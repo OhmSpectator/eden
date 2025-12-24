@@ -132,8 +132,13 @@ func (openEVEC *OpenEVEC) PodDeploy(appLink string, pc PodConfig, cfg *EdenSetup
 		registryToUse = ""
 	}
 	opts = append(opts, expect.WithRegistry(registryToUse))
+	if pc.NoHyper && pc.FMLMode {
+		return fmt.Errorf("--no-hyper and --fml flags are mutually exclusive")
+	}
 	if pc.NoHyper {
 		opts = append(opts, expect.WithVirtualizationMode(config.VmMode_NOHYPER))
+	} else if pc.FMLMode {
+		opts = append(opts, expect.WithVirtualizationMode(config.VmMode_FML))
 	}
 	opts = append(opts, expect.WithOpenStackMetadata(pc.OpenStackMetadata))
 	opts = append(opts, expect.WithProfiles(pc.Profiles))

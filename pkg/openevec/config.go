@@ -215,6 +215,7 @@ type PodConfig struct {
 	Profiles          []string
 	AppAdapters       []string
 	NoHyper           bool
+	FMLMode           bool
 	VncDisplay        int
 	VncPassword       string
 	VncForShimVM      bool

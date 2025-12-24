@@ -7,19 +7,20 @@ import (
 	"github.com/lf-edge/eden/pkg/defaults"
 )
 
-//QemuSettings struct for pass into template
+// QemuSettings struct for pass into template
 type QemuSettings struct {
 	DTBDrive   string
 	Firmware   []string
 	Disks      []string
+	USBDisks   []string // USB storage disk images to attach to the VM
 	MemoryMB   int
 	CPUs       int
 	USBSerials int
 	USBTablets int
 }
 
-//GenerateQemuConfig provides string representation of Qemu config
-//for QemuSettings object
+// GenerateQemuConfig provides string representation of Qemu config
+// for QemuSettings object
 func (settings QemuSettings) GenerateQemuConfig() ([]byte, error) {
 	t := template.New("t")
 	t, err := t.Parse(defaults.DefaultQemuTemplate)

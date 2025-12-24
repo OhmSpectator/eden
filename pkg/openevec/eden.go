@@ -109,6 +109,7 @@ func setupQemuConfig(cfg EdenSetupArgs) error {
 		DTBDrive: qemuDTBPathAbsolute,
 		Firmware: qemuFirmwareParam,
 		Disks:    qemuDisksParam,
+		USBDisks: cfg.Eve.USBDisks,
 		MemoryMB: cfg.Eve.QemuMemory,
 		CPUs:     cfg.Eve.QemuCpus,
 	}

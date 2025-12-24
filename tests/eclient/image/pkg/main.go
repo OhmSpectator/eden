@@ -45,6 +45,8 @@ var (
 		"File to save network info")
 	localNetConfigFile = flag.String("local-network-config", "/mnt/local-network-config.json",
 		"File to save local network config")
+	appBootConfigFile = flag.String("appbootconfig", "/mnt/appbootconfig",
+		"File with app boot configuration to send to EVE")
 	token = flag.String("token", "", "Token of profile server")
 )
 
@@ -54,6 +56,7 @@ var (
 	radioSilenceMTime      time.Time
 	appCmdMTime            time.Time
 	devCmdMTime            time.Time
+	appBootConfigMTime     time.Time
 )
 
 func main() {
@@ -64,6 +67,7 @@ func main() {
 	http.HandleFunc("/api/v1/devinfo", devinfo)
 	http.HandleFunc("/api/v1/location", location)
 	http.HandleFunc("/api/v1/network", network)
+	http.HandleFunc("/api/v1/app-boot-config", appBootConfig)
 	fmt.Println(http.ListenAndServe(":8888", nil))
 }
 
@@ -483,6 +487,66 @@ func network(w http.ResponseWriter, r *http.Request) {
 	}
 	localConfig.ServerToken = *token
 	data, err = proto.Marshal(localConfig)
+	if err != nil {
+		errStr := fmt.Sprintf("Marshal: %s", err)
+		fmt.Println(errStr)
+		http.Error(w, errStr, http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set(contentType, mimeProto)
+	w.WriteHeader(http.StatusOK)
+	if _, err := w.Write(data); err != nil {
+		fmt.Printf("Failed to write: %s\n", err)
+	}
+}
+
+// appBootConfig handles app boot configuration requests from EVE.
+// EVE polls this endpoint to get USB boot settings for VMs.
+// Note: EVE sends GET (no body) when requesting config, unlike other endpoints that use POST.
+func appBootConfig(w http.ResponseWriter, r *http.Request) {
+	// Accept both GET and POST - EVE may send GET when just requesting config
+	if r.Method != http.MethodPost && r.Method != http.MethodGet {
+		errStr := fmt.Sprintf("Unexpected method: %s", r.Method)
+		fmt.Println(errStr)
+		http.Error(w, errStr, http.StatusMethodNotAllowed)
+		return
+	}
+
+	// EVE sends an empty request body - it just wants the config
+	// We don't need to read/process any status from EVE
+
+	// Send app boot config if requested
+	info, err := os.Stat(*appBootConfigFile)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			errStr := fmt.Sprintf("Stat: %s", err)
+			fmt.Println(errStr)
+		}
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	if !info.ModTime().After(appBootConfigMTime) {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	appBootConfigMTime = info.ModTime()
+	data, err := os.ReadFile(*appBootConfigFile)
+	if err != nil {
+		errStr := fmt.Sprintf("ReadFile: %s", err)
+		fmt.Println(errStr)
+		http.Error(w, errStr, http.StatusInternalServerError)
+		return
+	}
+	bootConfigList := &profile.AppBootConfigList{}
+	err = protojson.Unmarshal(data, bootConfigList)
+	if err != nil {
+		errStr := fmt.Sprintf("Unmarshal: %s", err)
+		fmt.Println(errStr)
+		http.Error(w, errStr, http.StatusInternalServerError)
+		return
+	}
+	bootConfigList.ServerToken = *token
+	data, err = proto.Marshal(bootConfigList)
 	if err != nil {
 		errStr := fmt.Sprintf("Marshal: %s", err)
 		fmt.Println(errStr)

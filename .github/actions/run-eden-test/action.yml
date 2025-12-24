@@ -37,6 +37,11 @@ inputs:
   aziot_connection_string:
     description: 'Azure IoT connection string'
     required: false
+  usb_boot_enabled:
+    description: 'Enable USB boot disk for USB boot priority testing'
+    type: bool
+    required: false
+    default: 'false'
 
 
 runs:
@@ -63,6 +68,7 @@ runs:
         eve_artifact_name: ${{ inputs.eve_artifact_name }}
         artifact_run_id: ${{ inputs.artifact_run_id }}
         require_virtualization: ${{ inputs.require_virtualization }}
+        usb_boot_enabled: ${{ inputs.usb_boot_enabled }}
     - name: Run tests
       run: EDEN_TEST_STOP=n ./eden test ./tests/workflow -s ${{ inputs.suite }} -v debug
       shell: bash

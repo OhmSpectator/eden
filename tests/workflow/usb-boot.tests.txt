@@ -1,0 +1,16 @@
+# USB Boot Priority Tests
+# This test suite runs the USB boot priority test that verifies LPS can control
+# USB boot order on a per-VM basis using the bootOrderConfig API.
+#
+# Prerequisites:
+# - USB boot disk must be configured (done by setup-environment with usb_boot_enabled=true)
+# - EVE must have OVMF firmware for UEFI boot
+#
+# This suite is meant to be run with:
+#   ./eden test ./tests/workflow -s usb-boot.tests.txt -v debug
+
+eden+ports.sh 2223:2223 2224:2224 8027:8027 8028:8028 8029:8029 8030:8030 8031:8031
+
+/bin/echo USB Boot Priority Test
+eden.escript.test -testdata ../eclient/testdata/ -test.run TestEdenScripts/usb_boot_priority -test.timeout 120m
+

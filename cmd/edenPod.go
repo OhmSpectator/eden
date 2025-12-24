@@ -105,6 +105,7 @@ func newPodDeployCmd(cfg *openevec.EdenSetupArgs) *cobra.Command {
 	podDeployCmd.Flags().StringVar(&pc.ImageFormat, "format", "", "format for image, one of 'container','qcow2','raw','qcow','vmdk','vhdx','iso'; if not provided, defaults to container image for docker and oci transports, qcow2 for file and http/s transports")
 	podDeployCmd.Flags().BoolVar(&pc.ACLOnlyHost, "only-host", false, "Allow access only to host and external networks")
 	podDeployCmd.Flags().BoolVar(&pc.NoHyper, "no-hyper", false, "Run pod without hypervisor")
+	podDeployCmd.Flags().BoolVar(&pc.FMLMode, "fml", false, "Run VM with UEFI/OVMF firmware (FML mode)")
 	podDeployCmd.Flags().StringVar(&pc.Registry, "registry", "remote", "Select registry to use for containers (remote/local)")
 	podDeployCmd.Flags().BoolVar(&pc.DirectLoad, "direct", true, "Use direct download for image instead of eserver")
 	podDeployCmd.Flags().BoolVar(&pc.SftpLoad, "sftp", false, "Force use of sftp to load http/file image from eserver")

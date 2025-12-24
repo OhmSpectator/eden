@@ -14,17 +14,32 @@ import (
 	"github.com/spf13/viper"
 )
 
-// optionsWithMapTypeList contains options that should be encoded
+// optionsWithMapTypeList contains options that should be encoded as JSON maps
 var optionsWithMapTypeList = []string{"eve.hostfwd"}
 
-func isEncodingNeeded(contextKeySet string) bool {
+// optionsWithArrayTypeList contains options that should be encoded as JSON arrays
+var optionsWithArrayTypeList = []string{"eve.usb-disks"}
+
+func isMapEncodingNeeded(contextKeySet string) bool {
 	for _, k := range optionsWithMapTypeList {
-		if contextKeySet != k {
-			continue
+		if contextKeySet == k {
+			return true
 		}
-		return true
 	}
 	return false
+}
+
+func isArrayEncodingNeeded(contextKeySet string) bool {
+	for _, k := range optionsWithArrayTypeList {
+		if contextKeySet == k {
+			return true
+		}
+	}
+	return false
+}
+
+func isEncodingNeeded(contextKeySet string) bool {
+	return isMapEncodingNeeded(contextKeySet) || isArrayEncodingNeeded(contextKeySet)
 }
 
 func ReloadConfigDetails(cfg *EdenSetupArgs) error {
@@ -38,6 +53,7 @@ func ReloadConfigDetails(cfg *EdenSetupArgs) error {
 		cfg.Eve.QemuDTBPath = utils.ResolveAbsPath(viper.GetString("eve.dtb-part"))
 		cfg.Eve.ImageFile = utils.ResolveAbsPath(viper.GetString("eve.image-file"))
 		cfg.Eve.HostFwd = viper.GetStringMapString("eve.hostfwd")
+		cfg.Eve.USBDisks = viper.GetStringSlice("eve.usb-disks")
 		cfg.Eve.QemuFileToSave = utils.ResolveAbsPath(viper.GetString("eve.qemu-config"))
 		cfg.Eve.DevModel = viper.GetString("eve.devmodel")
 		cfg.Eve.Remote = viper.GetBool("eve.remote")
@@ -168,13 +184,21 @@ func ValidateConfigFromViper() error {
 }
 
 func processConfigKeyValue(contextKeySet, contextValueSet string) (interface{}, error) {
-	if isEncodingNeeded(contextKeySet) {
+	if isMapEncodingNeeded(contextKeySet) {
 		obj := make(map[string]interface{})
 		err := json.Unmarshal([]byte(contextValueSet), &obj)
 		if err != nil {
-			return nil, fmt.Errorf("failed to decode %s: %s", contextKeySet, err)
+			return nil, fmt.Errorf("failed to decode %s as map: %s", contextKeySet, err)
 		}
 		return obj, nil
+	}
+	if isArrayEncodingNeeded(contextKeySet) {
+		var arr []interface{}
+		err := json.Unmarshal([]byte(contextValueSet), &arr)
+		if err != nil {
+			return nil, fmt.Errorf("failed to decode %s as array: %s", contextKeySet, err)
+		}
+		return arr, nil
 	}
 	return contextValueSet, nil
 }

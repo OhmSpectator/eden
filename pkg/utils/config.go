@@ -317,6 +317,12 @@ func generateConfigFileFromTemplate(filePath string, templateString string, cont
 				log.Fatal(err)
 			}
 			return string(result)
+		case "eve.usb-disks":
+			result, err := json.Marshal([]string{})
+			if err != nil {
+				log.Fatal(err)
+			}
+			return string(result)
 		default:
 			log.Fatalf("Not found argument %s in config", inp)
 		}
@@ -438,6 +444,8 @@ func generateConfigFileFromTemplate(filePath string, templateString string, cont
 			return defaults.DefaultTPMEnabled
 		case "eve.disks":
 			return defaults.DefaultAdditionalDisks
+		case "eve.usb-disks":
+			return []string{}
 		case "eve.bootstrap-file":
 			return ""
 		case "eve.usbnetconf-file":

@@ -44,8 +44,8 @@ func StopSWTPM(stateDir string) error {
 
 func startQMPLogger(qmpSockFile string, qmpLogFile string) error {
 	shellcmd := fmt.Sprintf(
-		"echo '{\"execute\": \"qmp_capabilities\"}' | " +
-		"socat -t0 -,ignoreeof UNIX-CONNECT:%s > %s",
+		"echo '{\"execute\": \"qmp_capabilities\"}' | "+
+			"socat -t0 -,ignoreeof UNIX-CONNECT:%s > %s",
 		qmpSockFile, qmpLogFile)
 	opts := []string{
 		"-c", shellcmd,
@@ -64,7 +64,7 @@ func startQMPLogger(qmpSockFile string, qmpLogFile string) error {
 		break
 	}
 	if err != nil {
-		 return fmt.Errorf("startQMPLogger: can't connect to the QMP socket, presumably QEMU did not start")
+		return fmt.Errorf("startQMPLogger: can't connect to the QMP socket, presumably QEMU did not start")
 	}
 
 	return nil
@@ -211,10 +211,16 @@ func StartEVEQemu(qemuARCH, qemuOS, eveImageFile, imageFormat string, isInstalle
 		eveTelnetPort, logFile)
 	qemuOptions = consoleOps + qemuOptions
 	if !isInstaller {
-		qemuOptions += fmt.Sprintf("-drive file=%s,format=%s ", eveImageFile, imageFormat)
+		// Use named drive with device to set bootindex (bootindex is a device option, not drive option)
+		// bootindex=1 ensures EVE boots before USB devices (which have bootindex=99)
+		qemuOptions += fmt.Sprintf("-drive file=%s,format=%s,if=none,id=eve-disk ", eveImageFile, imageFormat)
+		qemuOptions += "-device virtio-blk-pci,drive=eve-disk,bootindex=1 "
 	}
 	if usbImagePath != "" {
-		qemuOptions += fmt.Sprintf("-drive format=raw,file=%s ", usbImagePath)
+		// Add USB disk with high bootindex (99) to ensure EVE boots first (bootindex=1)
+		// Use usb-storage device to properly emulate a USB drive
+		qemuOptions += fmt.Sprintf("-drive file=%s,format=raw,if=none,id=usb-drive-external ", usbImagePath)
+		qemuOptions += "-device usb-storage,drive=usb-drive-external,removable=on,bootindex=99 "
 	}
 
 	// keep readconfig after -drive as we locate additional disks in qemuConfigFile

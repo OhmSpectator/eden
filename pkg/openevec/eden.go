@@ -105,10 +105,17 @@ func setupQemuConfig(cfg EdenSetupArgs) error {
 		}
 		qemuDisksParam = append(qemuDisksParam, diskFile)
 	}
+	// Validate USB disk files exist
+	for _, usbDisk := range cfg.Eve.USBDisks {
+		if _, err := os.Stat(usbDisk); os.IsNotExist(err) {
+			return fmt.Errorf("USB disk file not found: %s", usbDisk)
+		}
+	}
 	settings := utils.QemuSettings{
 		DTBDrive: qemuDTBPathAbsolute,
 		Firmware: qemuFirmwareParam,
 		Disks:    qemuDisksParam,
+		USBDisks: cfg.Eve.USBDisks,
 		MemoryMB: cfg.Eve.QemuMemory,
 		CPUs:     cfg.Eve.QemuCpus,
 	}

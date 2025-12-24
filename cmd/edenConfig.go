@@ -85,6 +85,7 @@ func newConfigAddCmd(cfg *openevec.EdenSetupArgs) *cobra.Command {
 	configAddCmd.Flags().StringVarP(&cfg.Eve.QemuConfigPath, "config-part", "", cfg.Eve.QemuConfigPath, "path for config drive")
 	configAddCmd.Flags().StringVarP(&cfg.Eve.QemuDTBPath, "dtb-part", "", cfg.Eve.QemuDTBPath, "path for device tree drive (for arm)")
 	configAddCmd.Flags().StringToStringVarP(&cfg.Eve.HostFwd, "eve-hostfwd", "", defaults.DefaultQemuHostFwd, "port forward map")
+	configAddCmd.Flags().StringSliceVar(&cfg.Eve.USBDisks, "eve-usb-disks", nil, "USB disk images to attach to EVE QEMU (for USB passthrough testing)")
 	configAddCmd.Flags().StringVar(&cfg.Eve.Ssid, "ssid", "", "set ssid of wifi for rpi")
 	configAddCmd.Flags().StringVar(&cfg.Eve.Arch, "arch", cfg.Eve.Arch, "arch of EVE (amd64 or arm64)")
 	configAddCmd.Flags().StringVar(&cfg.Eve.ModelFile, "devmodel-file", cfg.Eve.ModelFile, "File to use for overwrite of model defaults")

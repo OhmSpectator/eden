@@ -124,6 +124,10 @@ You can set access VLAN ID (VID) for a particular network in the format '<networ
 	podDeployCmd.Flags().StringVar(&pc.DatastoreOverride, "datastoreOverride", "", "Override datastore path for disks (when we use different URL for Eden and EVE or for local datastore)")
 	podDeployCmd.Flags().Uint32Var(&pc.StartDelay, "start-delay", 0, "The amount of time (in seconds) that EVE waits (after boot finish) before starting application")
 	podDeployCmd.Flags().BoolVar(&pc.PinCpus, "pin-cpus", false, "Pin the CPUs used by the pod")
+	podDeployCmd.Flags().StringVar(&pc.BootOrder, "boot-order", "", `Boot order for VMs. Supported values:
+  "" (empty/default): Default boot order
+  "usb": Prioritize USB devices in boot order
+  "nousb": Deprioritize USB devices in boot order`)
 
 	return podDeployCmd
 }
@@ -268,6 +272,7 @@ func newPodLogsCmd(cfg *openevec.EdenSetupArgs) *cobra.Command {
 func newPodModifyCmd() *cobra.Command {
 	var podNetworks, portPublish, acl, vlans []string
 	var startDelay uint32
+	var bootOrder string
 
 	var podModifyCmd = &cobra.Command{
 		Use:   "modify <app>",
@@ -275,8 +280,8 @@ func newPodModifyCmd() *cobra.Command {
 		Args:  cobra.ExactArgs(1),
 		Run: func(cmd *cobra.Command, args []string) {
 			appName := args[0]
-			if err := openEVEC.PodModify(appName, podNetworks, portPublish, acl, vlans, startDelay); err != nil {
-				log.Fatalf("EVE pod start failed: %s", err)
+			if err := openEVEC.PodModify(appName, podNetworks, portPublish, acl, vlans, startDelay, bootOrder); err != nil {
+				log.Fatalf("EVE pod modify failed: %s", err)
 			}
 		},
 	}
@@ -291,6 +296,11 @@ To block all traffic define ACL with no endpoints: '<network_name>:'`)
 	podModifyCmd.Flags().StringSliceVar(&vlans, "vlan", nil, `Connect application to the (switch) network over an access port assigned to the given VLAN.
 You can set access VLAN ID (VID) for a particular network in the format '<network_name:VID>'`)
 	podModifyCmd.Flags().Uint32Var(&startDelay, "start-delay", 0, "The amount of time (in seconds) that EVE waits (after boot finish) before starting application")
+	podModifyCmd.Flags().StringVar(&bootOrder, "boot-order", "", `Boot order for VMs. Supported values:
+  "" (empty/default): No change
+  "usb": Prioritize USB devices in boot order
+  "nousb": Deprioritize USB devices in boot order
+Requires VM restart to take effect.`)
 
 	return podModifyCmd
 }

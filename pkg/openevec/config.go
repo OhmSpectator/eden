@@ -233,6 +233,9 @@ type PodConfig struct {
 	OpenStackMetadata bool
 	DatastoreOverride string
 	ACLOnlyHost       bool
+	// BootOrder controls boot device priority for VMs.
+	// Supported values: "" (default), "usb" (prioritize USB), "nousb" (deprioritize USB)
+	BootOrder string
 }
 
 func Merge(dst, src reflect.Value, flags *pflag.FlagSet) {

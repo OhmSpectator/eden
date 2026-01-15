@@ -2,6 +2,7 @@ FROM golang:1.23-alpine AS build
 
 WORKDIR /go/src/local_manager
 COPY pkg .
+COPY eve-api-go ../eve-api-go
 
 RUN CGO_ENABLED=0 go build -ldflags "-s -w" -o /out/root/local_manager main.go
 

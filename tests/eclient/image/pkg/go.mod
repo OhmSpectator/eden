@@ -8,3 +8,6 @@ require (
 )
 
 require github.com/google/go-cmp v0.6.0 // indirect
+
+replace github.com/lf-edge/eve-api/go => ../eve-api-go
+

@@ -54,8 +54,8 @@ type AppExpectation struct {
 
 	baseOSVersion string
 
-	vncDisplay  int
-	vncPassword string
+	vncDisplay   int
+	vncPassword  string
 	vncForShimVM bool
 
 	netInstances []*NetInstanceExpectation
@@ -87,6 +87,8 @@ type AppExpectation struct {
 	datastoreOverride string
 	startDelay        uint32
 	pinCpus           bool
+	// bootOrder controls boot device priority for VMs.
+	bootOrder evecommon.BootOrder
 }
 
 // use provided appLink to try predict format of volume

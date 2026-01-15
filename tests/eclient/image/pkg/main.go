@@ -47,6 +47,8 @@ var (
 		"File to save local network config")
 	appBootConfigFile = flag.String("appbootconfig", "/mnt/appbootconfig",
 		"File with app boot configuration to send to EVE")
+	appBootInfoFile = flag.String("appbootinfo", "/mnt/appbootinfo.json",
+		"File to save app boot info status received from EVE")
 	token = flag.String("token", "", "Token of profile server")
 )
 
@@ -67,7 +69,7 @@ func main() {
 	http.HandleFunc("/api/v1/devinfo", devinfo)
 	http.HandleFunc("/api/v1/location", location)
 	http.HandleFunc("/api/v1/network", network)
-	http.HandleFunc("/api/v1/app-boot-config", appBootConfig)
+	http.HandleFunc("/api/v1/appbootinfo", appBootInfo)
 	fmt.Println(http.ListenAndServe(":8888", nil))
 }
 
@@ -500,23 +502,49 @@ func network(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// appBootConfig handles app boot configuration requests from EVE.
-// EVE polls this endpoint to get USB boot settings for VMs.
-// Note: EVE sends GET (no body) when requesting config, unlike other endpoints that use POST.
-func appBootConfig(w http.ResponseWriter, r *http.Request) {
-	// Accept both GET and POST - EVE may send GET when just requesting config
-	if r.Method != http.MethodPost && r.Method != http.MethodGet {
+// appBootInfo handles app boot info status from EVE and optionally returns boot config.
+// EVE POSTs the effective boot order and source for each application.
+// LPS responds with AppBootConfigList if there's config to apply, or 204 if no changes.
+func appBootInfo(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
 		errStr := fmt.Sprintf("Unexpected method: %s", r.Method)
 		fmt.Println(errStr)
 		http.Error(w, errStr, http.StatusMethodNotAllowed)
 		return
 	}
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		errStr := fmt.Sprintf("Failed to read request body: %v", err)
+		fmt.Println(errStr)
+		http.Error(w, errStr, http.StatusBadRequest)
+		return
+	}
+	bootInfoList := &profile.AppBootInfoList{}
+	err = proto.Unmarshal(body, bootInfoList)
+	if err != nil {
+		errStr := fmt.Sprintf("Failed to unmarshal request body: %v", err)
+		fmt.Println(errStr)
+		http.Error(w, errStr, http.StatusBadRequest)
+		return
+	}
+	data, err := protojson.MarshalOptions{Multiline: true}.Marshal(bootInfoList)
+	if err != nil {
+		errStr := fmt.Sprintf("Marshal: %s", err)
+		fmt.Println(errStr)
+		http.Error(w, errStr, http.StatusInternalServerError)
+		return
+	}
+	err = os.WriteFile(*appBootInfoFile, data, 0644)
+	if err != nil {
+		errStr := fmt.Sprintf("Failed to write app boot info: %v", err)
+		fmt.Println(errStr)
+		http.Error(w, errStr, http.StatusInternalServerError)
+		return
+	}
+	fmt.Printf("Received app boot info for %d apps\n", len(bootInfoList.AppsBootInfo))
 
-	// EVE sends an empty request body - it just wants the config
-	// We don't need to read/process any status from EVE
-
-	// Send app boot config if requested
-	info, err := os.Stat(*appBootConfigFile)
+	// Return boot config if available (following appinfo/appCmdFile pattern).
+	fileInfo, err := os.Stat(*appBootConfigFile)
 	if err != nil {
 		if !os.IsNotExist(err) {
 			errStr := fmt.Sprintf("Stat: %s", err)
@@ -525,12 +553,12 @@ func appBootConfig(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
-	if !info.ModTime().After(appBootConfigMTime) {
+	if !fileInfo.ModTime().After(appBootConfigMTime) {
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
-	appBootConfigMTime = info.ModTime()
-	data, err := os.ReadFile(*appBootConfigFile)
+	appBootConfigMTime = fileInfo.ModTime()
+	data, err = os.ReadFile(*appBootConfigFile)
 	if err != nil {
 		errStr := fmt.Sprintf("ReadFile: %s", err)
 		fmt.Println(errStr)

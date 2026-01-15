@@ -1,5 +1,7 @@
-# Test USB boot priority control via LPS using bootOrderConfig (usb/nousb)
-# This test verifies that LPS can control USB boot order on a per-VM basis
+# Test USB boot priority control via Controller API and LPS
+# This test verifies that boot order can be controlled:
+#   1. Via Controller API: VmConfig.boot_order field in AppInstanceConfig
+#   2. Via LPS: /api/v1/appbootinfo endpoint with bootOrderConfig
 #
 # PREREQUISITES:
 # ==============
@@ -8,29 +10,29 @@
 #    (e.g., from the feature/usb-boot-order-config branch in eve repo)
 # 2. A USB disk image (Debian) attached to EVE's QEMU
 #
-# Before running this test, you must set up the USB disk using one of these methods:
+# Before running this test, follow these steps:
 #
-# Method 1: Use the setup script (RECOMMENDED)
-#   1. Run: EDEN=./eden EVE_TAG=<tag-with-patched-ovmf> ./tests/eclient/usb-boot-setup.sh
-#   2. Configure port forwarding:
-#      EDEN=./eden ./tests/eclient/eden+ports.sh 8027:8027 8028:8028 8029:8029 8030:8030 8031:8031
-#   3. Then run: ./eden setup && ./eden start && ./eden eve onboard
-#   4. Finally: ./eden test tests/eclient -v debug -e usb_boot_priority
+# Step 1: Clean and build Eden
+#   make clean
+#   rm -rf ~/.eden
+#   make build-tests
 #
-# Method 2: Manual configuration
-#   1. Download Debian cloud image:
-#      curl -L -o /tmp/debian.raw https://cloud.debian.org/images/cloud/bookworm/latest/debian-12-nocloud-amd64.raw
-#   2. Configure Eden with USB disk and EVE tag:
-#      ./eden config add default --eve-usb-disks="/tmp/debian.raw" --eve-tag="<tag-with-patched-ovmf>"
-#   3. Configure port forwarding (ports 8027-8031 for test VM SSH):
-#      EDEN=./eden ./tests/eclient/eden+ports.sh 8027:8027 8028:8028 8029:8029 8030:8030 8031:8031
-#   4. Setup and start Eden: ./eden setup && ./eden start && ./eden eve onboard
-#   5. Run test: ./eden test tests/eclient -v debug -e usb_boot_priority
+# Step 2: Run the USB boot setup script
+#   EVE_TAG="<tag-with-patched-ovmf>" ./tests/eclient/usb-boot-setup.sh
+#   # Example: EVE_TAG="0.0.0-feature_usb-boot-order-config-c85715b2-dirty-2025-12-23.13.23" ./tests/eclient/usb-boot-setup.sh
 #
-# Method 3: Run via workflow (used in GH Actions)
-#   The usb-boot.tests.txt workflow handles port forwarding automatically.
-#   Run: ./eden test ./tests/workflow -s usb-boot.tests.txt -v debug
-#   Note: Requires usb-boot-setup.sh to be run first (done by setup-environment action in CI)
+# Step 3: Run Eden setup
+#   ./eden setup
+#
+# Step 4: Configure port forwarding (AFTER setup)
+#   ./dist/bin/eden+ports.sh 8027:8027 8028:8028 8029:8029 8030:8030 8031:8031
+#
+# Step 5: Start Eden and onboard EVE
+#   ./eden start
+#   ./eden eve onboard
+#
+# Step 6: Run
+#   ./eden test tests/eclient -v debug -e usb_boot_priority
 #
 # What this test verifies:
 # The fw_cfg "opt/eve.bootorder" tells OVMF (UEFI firmware) how to order boot devices.
@@ -38,38 +40,52 @@
 # - "nousb": Deprioritize USB devices in boot order -> VM boots from main drive (Ubuntu)
 # - "" or unset: Default boot order (determined by FML resolution config)
 #
-# Test cases:
+# TEST ORGANIZATION (Simple to Complex):
+# ======================================
 #
-# Boot Order Tests (1-6):
-#   TC1: Custom resolution, no fw_cfg -> HDD boot (Ubuntu) - default boot order
-#   TC2: No resolution, no fw_cfg -> USB boot (Debian) - OVMF default prefers USB
-#   TC3: Custom resolution, fw_cfg="usb" -> USB boot (Debian) - fw_cfg overrides
-#   TC4: No resolution, fw_cfg="usb" -> USB boot (Debian) - fw_cfg confirms USB priority
-#   TC5: Custom resolution, fw_cfg="nousb" -> HDD boot (Ubuntu) - fw_cfg deprioritizes USB
-#   TC6: No resolution, fw_cfg="nousb" -> HDD boot (Ubuntu) - fw_cfg overrides OVMF default
+# PHASE 1: NO LPS REQUIRED (Controller API and Device Property)
+# These tests run first, before LPS is deployed.
+#   TC-DEV-1 to TC-DEV-3: Device property app.boot.order tests
+#   TC-CTRL-1 to TC-CTRL-4: Controller API boot_order tests
+#   TC-PRIO-1: Device vs Controller priority (no LPS)
+#   TC-EMPTY-1: Empty string at Controller level
 #
-# Multi-VM Test (7):
-#   TC7: Per-VM USB boot control with different settings for each VM
+# PHASE 2: LPS REQUIRED (LPS endpoint tests)
+# LPS (local-manager) is deployed, then these tests run.
+#   TC-INSTALL-1: *** MAIN CUSTOMER USE CASE ***
+#                 OS installation workflow from USB in FML mode
+#                 Deploys 3 apps (2 FML VMs + 1 container) like typical customer
+#                 (Device=nousb default -> LPS=usb install -> LPS=UNSPECIFIED post-install)
+#   TC-PRIO-2: Full priority hierarchy with LPS (LPS > Controller > Device)
+#   TC-PRIO-4: LPS clear -> fallback to Controller (tests cache clearing)
+#   TC-PRIO-3: Device property as fallback when Controller/LPS empty
+#   TC-PRIO-5: LPS explicit UNSPECIFIED -> fallback to Device (different code path)
+#   TC-EMPTY-2 to TC-EMPTY-8: LPS edge cases (empty values, 404, etc.)
+#   TC1-TC6: Basic LPS boot order tests
+#   TC7: Multi-VM with different LPS settings
+#   TC8-TC9: LPS config parsing (UUID/displayname)
+#   TC10: LPS address change handling
+#   TC11-TC13: HTTP status codes (200, 204, 404)
+#   TC14-TC16: Config reset methods
 #
-# LPS Config Parsing Tests (8-9):
-#   TC8: UUID-only config (no displayname) -> EVE matches by UUID
-#   TC9: Displayname-only config (no UUID) -> EVE matches by displayname
+# PHASE 3: EVE REBOOT REQUIRED (Persistence tests - most complex)
+# These tests trigger EVE reboots to verify persistence.
+#   TC17: Basic LPS config persistence across EVE reboot
+#   TC17-HIER: Full hierarchy persistence (LPS > Controller > Device)
+#   TC18: Warning when setting boot order on running VM
 #
-# LPS Address Change Test (10):
-#   TC10: Verify EVE re-fetches config when LPS address changes (pause/resume)
+# LPS Persistence Behavior:
+#   Since LPS runs as a VM on the same EVE device, it's unavailable during EVE
+#   reboot until the LPS VM starts. EVE persists LPS boot configs to disk so
+#   they can be applied immediately when VMs start, before LPS is available.
 #
-# HTTP Status Code Tests (11-13):
-#   TC11: HTTP 200/201 - Normal config response
-#   TC12: HTTP 204 - No content (config unchanged), also 200 with same content
-#   TC13: HTTP 404 - Not found (triggers throttling and recovery)
+#   - LPS unavailable (during EVE boot): Cache preserved, persisted config applied
+#   - HTTP 404: Cache CLEARED (LPS has no config → fall back to Controller/Device)
+#   - HTTP 204: Cache preserved (no changes)
+#   - HTTP 200 with apps: Cache updated (apps not in list are reset to default)
+#   - HTTP 200 with empty list: Cache cleared (ALL apps reset to default)
 #
-# Config Reset Tests (14-16):
-#   TC14: Reset by removing app from config
-#   TC15: Reset by setting usb_boot="" explicitly
-#   TC16: Reset ALL apps by sending empty config
-#
-# Persistence Test (17):
-#   TC17: Verify config persists across EVE reboot
+#   KEY: LPS unavailable PRESERVES cache; 404 CLEARS cache.
 #
 # The USB disk contains Debian, the main drive contains Ubuntu cloud image.
 # We verify the correct OS booted by checking console output for "Debian" vs "Ubuntu".
@@ -79,17 +95,23 @@
 # to catch the brief RUNNING state and verify boot OS from console logs.
 #
 # NOTE: The USB disk (Debian) is attached via --adapters USB<bus>:<port> passthrough.
-# The bootOrderConfig field in LPS API accepts: "", "usb", or "nousb".
+# The usb_boot field in LPS API accepts enum values: BOOT_ORDER_UNSPECIFIED, BOOT_ORDER_USB, BOOT_ORDER_NOUSB
+# The boot_order field in Controller API (VmConfig) accepts enum values: BOOT_ORDER_UNSPECIFIED, BOOT_ORDER_USB, BOOT_ORDER_NOUSB
+# The app.boot.order device property accepts strings: "", "usb", "nousb"
+# LPS takes precedence over Controller if both are configured.
 
 {{define "port"}}8027{{end}}
 {{define "vm_port"}}8028{{end}}
+{{define "vm_port_2"}}8029{{end}}
+{{define "vm_port_3"}}8030{{end}}
 {{define "token"}}server_token_usb_boot_test{{end}}
 {{define "appbootconfig_file"}}/mnt/appbootconfig{{end}}
 {{define "network"}}n1{{end}}
 {{define "ssh"}}ssh -q -o ConnectTimeout=10 -o StrictHostKeyChecking=no -o PasswordAuthentication=no -i {{EdenConfig "eden.tests"}}/eclient/image/cert/id_rsa root@FWD_IP -p FWD_PORT{{end}}
-{{define "eclient_image"}}docker://nikolayzededa/eden-eclient:1.0.20{{end}}
+{{define "eclient_image"}}docker://nikolayzededa/eden-eclient:1.0.26{{end}}
 {{define "test_vm"}}test-usb-boot-vm{{end}}
 {{define "test_vm_2"}}test-usb-boot-vm-2{{end}}
+{{define "test_vm_3"}}test-container{{end}}
 
 [!exec:bash] stop
 [!exec:sleep] stop
@@ -101,12 +123,417 @@ exec chmod 600 {{EdenConfig "eden.tests"}}/eclient/image/cert/id_rsa
 
 
 message 'Resetting of EVE'
-eden eve reset
-exec sleep 30
+# Note: eden eve reset is commented out because it removes the device state file
+# which breaks subsequent eden commands. If you need a clean state, stop and
+# restart eden with: ./eden stop && ./eden start && ./eden eve onboard
+# eden eve reset
+# exec sleep 30
 
 # Create n1 network
 eden -t 1m network create 10.11.12.0/24 -n {{template "network"}}
 test eden.network.test -test.v -timewait 2m ACTIVATED {{template "network"}}
+
+# Detect USB harddrive on EVE dynamically (needed for both controller and LPS tests)
+message 'Detecting USB harddrive on EVE for passthrough'
+exec -t 1m bash detect-usb-harddrive.sh
+source .env
+stdout 'USB_ADAPTER='
+
+# ############################################################################
+# PHASE 1: DEVICE PROPERTY AND CONTROLLER API TESTS (No LPS Required)
+# These tests verify boot order configuration without LPS.
+# Prerequisites: Network created, USB drive detected
+# ############################################################################
+
+# ############################################################################
+# DEVICE PROPERTY TESTS (TC-DEV-1 to TC-DEV-3)
+# These tests verify boot_order via device config property app.boot.order
+# The device property provides a device-wide default for all VMs
+# ############################################################################
+
+# ============================================================================
+# TC-DEV-1: Device property app.boot.order=usb -> USB boot (Debian)
+# No resolution set, no per-app boot_order - device property takes effect
+# ============================================================================
+message '=== TC-DEV-1: Device Property - app.boot.order=usb -> Debian (USB boot) ==='
+
+# Ensure no FML resolution is set (so OVMF default would be USB anyway,
+# but we're testing that device property is actually read)
+eden controller edge-node update --config app.fml.resolution=
+
+# Set device-wide boot order property to "usb"
+eden controller edge-node update --config app.boot.order=usb
+
+# Wait for EVE to pick up the config
+message 'Waiting for EVE to apply device config...'
+exec sleep 15
+
+# Deploy test VM without per-app boot_order (should use device property)
+message 'Deploying test VM without per-app boot_order (device property should apply)'
+eden pod deploy -n {{template "test_vm"}} --memory=1024MB --vnc-display=1 --fml -p {{template "vm_port"}}:22 --adapters $usb_adapter https://cloud-images.ubuntu.com/releases/focal/release-20210510/ubuntu-20.04-server-cloudimg-amd64.img --networks={{template "network"}}
+
+# USB boot VM may become unstable - use custom polling
+exec -t 5m bash wait-for-running-once.sh {{template "test_vm"}}
+
+# Get test VM UUID
+exec bash get-vm-uuid.sh {{template "test_vm"}}
+source .env
+
+# Record timestamp for log filtering
+exec bash record-timestamp.sh
+
+# Verify fw_cfg is set to "usb" (from device property)
+message 'TC-DEV-1a: Verify fw_cfg=usb in hypervisor config (from device property)'
+exec -t 2m bash verify-hypervisor-config-v2.sh $vm_uuid usb
+stdout 'fw_cfg USB boot: usb'
+
+# Verify Debian boots (USB boot due to device property)
+message 'TC-DEV-1b: Verify VM boots from USB (Debian) - device property=usb'
+exec -t 2m bash verify-boot-os-v2.sh {{template "test_vm"}} debian
+stdout 'BOOT OS VERIFIED'
+message '=== TC-DEV-1 PASSED ==='
+
+# Cleanup TC-DEV-1
+eden pod delete {{template "test_vm"}}
+test eden.app.test -test.v -timewait 5m - {{template "test_vm"}}
+
+# ============================================================================
+# TC-DEV-2: Device property app.boot.order=nousb -> HDD boot (Ubuntu)
+# No resolution set (OVMF default would be USB), device property overrides
+# ============================================================================
+message '=== TC-DEV-2: Device Property - app.boot.order=nousb -> Ubuntu (HDD boot) ==='
+
+# Set device-wide boot order property to "nousb"
+eden controller edge-node update --config app.boot.order=nousb
+
+# Wait for EVE to pick up the config
+message 'Waiting for EVE to apply device config...'
+exec sleep 15
+
+# Deploy test VM without per-app boot_order (should use device property)
+message 'Deploying test VM without per-app boot_order (device property should apply)'
+eden pod deploy -n {{template "test_vm"}} --memory=1024MB --vnc-display=1 --fml -p {{template "vm_port"}}:22 --adapters $usb_adapter https://cloud-images.ubuntu.com/releases/focal/release-20210510/ubuntu-20.04-server-cloudimg-amd64.img --networks={{template "network"}}
+test eden.app.test -test.v -timewait 10m RUNNING {{template "test_vm"}}
+
+# Get test VM UUID
+exec bash get-vm-uuid.sh {{template "test_vm"}}
+source .env
+
+# Record timestamp for log filtering
+exec bash record-timestamp.sh
+
+# Verify fw_cfg is set to "nousb" (from device property)
+message 'TC-DEV-2a: Verify fw_cfg=nousb in hypervisor config (from device property)'
+exec -t 2m bash verify-hypervisor-config-v2.sh $vm_uuid nousb
+stdout 'fw_cfg USB boot: nousb'
+
+# Verify Ubuntu boots (HDD boot due to device property overriding OVMF default)
+message 'TC-DEV-2b: Verify VM boots from HDD (Ubuntu) - device property=nousb overrides OVMF'
+exec -t 2m bash verify-boot-os-v2.sh {{template "test_vm"}} ubuntu
+stdout 'BOOT OS VERIFIED'
+message '=== TC-DEV-2 PASSED ==='
+
+# Cleanup TC-DEV-2
+eden pod delete {{template "test_vm"}}
+test eden.app.test -test.v -timewait 5m - {{template "test_vm"}}
+
+# ============================================================================
+# TC-DEV-3: Change device property on EXISTING VM (tests applyDevicePropertyBootOrder)
+# This tests the scenario where app.boot.order changes while a VM is already running.
+# The VM should pick up the new boot order without being redeployed.
+# Flow: Deploy VM with nousb -> change to usb -> restart VM -> verify USB boot
+# ============================================================================
+message '=== TC-DEV-3: Device Property Change on Existing VM (applyDevicePropertyBootOrder) ==='
+
+# Start with device property = nousb
+eden controller edge-node update --config app.boot.order=nousb
+
+# Wait for EVE to pick up the config
+message 'Waiting for EVE to apply device config (nousb)...'
+exec sleep 15
+
+# Deploy test VM without per-app boot_order (uses device property = nousb)
+message 'Deploying test VM with device property=nousb (initial state)'
+eden pod deploy -n {{template "test_vm"}} --memory=1024MB --vnc-display=1 --fml -p {{template "vm_port"}}:22 --adapters $usb_adapter https://cloud-images.ubuntu.com/releases/focal/release-20210510/ubuntu-20.04-server-cloudimg-amd64.img --networks={{template "network"}}
+
+# Wait for VM to be running
+exec -t 5m bash wait-for-running-once.sh {{template "test_vm"}}
+
+# Get test VM UUID
+exec bash get-vm-uuid.sh {{template "test_vm"}}
+source .env
+
+# Verify initial state: fw_cfg=nousb, boots Ubuntu (HDD)
+message 'TC-DEV-3a: Verify initial state - fw_cfg=nousb, Ubuntu boots'
+exec -t 2m bash verify-hypervisor-config-v2.sh $vm_uuid nousb
+stdout 'fw_cfg USB boot: nousb'
+exec -t 2m bash verify-boot-os-v2.sh {{template "test_vm"}} ubuntu
+stdout 'BOOT OS VERIFIED'
+
+# Now change device property to usb while VM exists
+message 'TC-DEV-3b: Changing device property to usb on existing VM...'
+eden controller edge-node update --config app.boot.order=usb
+
+# Wait for EVE to pick up the new property and apply it to existing apps
+# This exercises applyDevicePropertyBootOrder() function
+message 'Waiting for EVE to apply new device property to existing VM...'
+exec sleep 20
+
+# Restart the VM to pick up the new boot order
+# (boot order change requires VM restart to take effect)
+message 'TC-DEV-3c: Restarting VM to apply new boot order...'
+eden pod stop {{template "test_vm"}}
+test eden.app.test -test.v -timewait 20m HALTED {{template "test_vm"}}
+eden pod start {{template "test_vm"}}
+test eden.app.test -test.v -timewait 10m RUNNING {{template "test_vm"}}
+
+# Record timestamp for log filtering
+exec bash record-timestamp.sh
+
+# Verify new state: fw_cfg=usb (changed via applyDevicePropertyBootOrder)
+message 'TC-DEV-3d: Verify fw_cfg changed to usb after device property update'
+exec -t 2m bash verify-hypervisor-config-v2.sh $vm_uuid usb
+stdout 'fw_cfg USB boot: usb'
+
+# Verify Debian boots (USB boot due to updated device property)
+message 'TC-DEV-3e: Verify VM now boots from USB (Debian) after property change'
+exec -t 2m bash verify-boot-os-v2.sh {{template "test_vm"}} debian
+stdout 'BOOT OS VERIFIED'
+message '=== TC-DEV-3 PASSED ==='
+
+# Cleanup TC-DEV-3
+eden pod delete {{template "test_vm"}}
+test eden.app.test -test.v -timewait 5m - {{template "test_vm"}}
+
+# Reset device property for next tests
+eden controller edge-node update --config app.boot.order=
+
+message '========================================'
+message 'DEVICE PROPERTY TESTS COMPLETED (TC-DEV-1 to TC-DEV-3)'
+message '========================================'
+
+# ############################################################################
+# CONTROLLER API TESTS (TC-CTRL-1 to TC-CTRL-4)
+# These tests verify boot_order via Controller API (VmConfig.boot_order)
+# No LPS is needed - boot order is set via --boot-order flag in eden pod deploy
+# and can be changed via eden pod modify --boot-order
+# ############################################################################
+
+# ============================================================================
+# TC-CTRL-1: Custom resolution + boot_order=usb -> USB boot (Debian)
+# fw_cfg="usb" overrides the resolution setting that would cause HDD boot
+# ============================================================================
+message '=== TC-CTRL-1: Controller API - Custom resolution + boot_order=usb -> Debian (USB boot) ==='
+
+# Set FML resolution (this normally causes HDD boot without fw_cfg override)
+eden controller edge-node update --config app.fml.resolution=1024x768
+
+# Wait for EVE to pick up the resolution setting
+message 'Waiting for EVE to apply FML resolution setting...'
+exec -t 2m bash wait-fml-resolution-applied.sh 1024x768
+
+# Deploy test VM with boot_order=usb via controller API
+message 'Deploying test VM with --boot-order=usb (FML mode, custom resolution)'
+eden pod deploy -n {{template "test_vm"}} --memory=1024MB --vnc-display=1 --fml --boot-order=usb -p {{template "vm_port"}}:22 --adapters $usb_adapter https://cloud-images.ubuntu.com/releases/focal/release-20210510/ubuntu-20.04-server-cloudimg-amd64.img --networks={{template "network"}}
+
+# USB boot VM may become unstable - use custom polling
+exec -t 5m bash wait-for-running-once.sh {{template "test_vm"}}
+
+# Get test VM UUID
+exec bash get-vm-uuid.sh {{template "test_vm"}}
+source .env
+
+# Record timestamp for log filtering
+exec bash record-timestamp.sh
+
+# Verify fw_cfg is set to "usb" in hypervisor config
+message 'TC-CTRL-1a: Verify fw_cfg=usb in hypervisor config'
+exec -t 2m bash verify-hypervisor-config-v2.sh $vm_uuid usb
+stdout 'fw_cfg USB boot: usb'
+
+# Verify Debian boots (USB boot due to fw_cfg=usb override)
+message 'TC-CTRL-1b: Verify VM boots from USB (Debian) - fw_cfg=usb overrides resolution'
+exec -t 2m bash verify-boot-os-v2.sh {{template "test_vm"}} debian
+stdout 'BOOT OS VERIFIED'
+message '=== TC-CTRL-1 PASSED ==='
+
+# ============================================================================
+# TC-CTRL-2: Custom resolution + boot_order=nousb -> HDD boot (Ubuntu)
+# fw_cfg="nousb" confirms HDD priority (same as resolution default)
+# Use pod modify + restart instead of redeploy
+# ============================================================================
+message '=== TC-CTRL-2: Controller API - Custom resolution + boot_order=nousb -> Ubuntu (HDD boot) ==='
+
+# Modify VM boot order via controller API (no redeploy needed)
+message 'Modifying VM boot_order to nousb via pod modify'
+eden pod modify {{template "test_vm"}} --boot-order=nousb
+
+# Restart VM to apply the new boot_order setting
+message 'Restarting VM to apply boot_order=nousb'
+eden pod stop {{template "test_vm"}}
+test eden.app.test -test.v -timewait 20m HALTED {{template "test_vm"}}
+eden pod start {{template "test_vm"}}
+test eden.app.test -test.v -timewait 10m RUNNING {{template "test_vm"}}
+
+# Record timestamp for log filtering
+exec bash record-timestamp.sh
+
+# Verify fw_cfg is set to "nousb" in hypervisor config
+message 'TC-CTRL-2a: Verify fw_cfg=nousb in hypervisor config'
+exec -t 2m bash verify-hypervisor-config-v2.sh $vm_uuid nousb
+stdout 'fw_cfg USB boot: nousb'
+
+# Verify Ubuntu boots (HDD boot due to fw_cfg=nousb)
+message 'TC-CTRL-2b: Verify VM boots from HDD (Ubuntu) - fw_cfg=nousb confirms HDD priority'
+exec -t 2m bash verify-boot-os-v2.sh {{template "test_vm"}} ubuntu
+stdout 'BOOT OS VERIFIED'
+message '=== TC-CTRL-2 PASSED ==='
+
+# ============================================================================
+# TC-CTRL-3: Custom resolution + no boot_order -> HDD boot (Ubuntu)
+# Default behavior with resolution set: OVMF boots from HDD (no fw_cfg)
+# Need to redeploy to get a VM without boot_order set
+# ============================================================================
+message '=== TC-CTRL-3: Controller API - Custom resolution + no boot_order -> Ubuntu (HDD boot) ==='
+
+# Delete current VM and redeploy without --boot-order flag
+message 'Redeploying VM without --boot-order (to test default behavior)'
+eden pod delete {{template "test_vm"}}
+test eden.app.test -test.v -timewait 5m - {{template "test_vm"}}
+
+eden pod deploy -n {{template "test_vm"}} --memory=1024MB --vnc-display=1 --fml -p {{template "vm_port"}}:22 --adapters $usb_adapter https://cloud-images.ubuntu.com/releases/focal/release-20210510/ubuntu-20.04-server-cloudimg-amd64.img --networks={{template "network"}}
+test eden.app.test -test.v -timewait 10m RUNNING {{template "test_vm"}}
+
+# Get test VM UUID (may have changed after redeploy)
+exec bash get-vm-uuid.sh {{template "test_vm"}}
+source .env
+
+# Record timestamp for log filtering
+exec bash record-timestamp.sh
+
+# Verify NO fw_cfg is set (boot_order is empty/not set)
+message 'TC-CTRL-3a: Verify NO fw_cfg in hypervisor config (no boot_order set)'
+exec -t 2m bash verify-hypervisor-config-v2.sh $vm_uuid none
+stdout 'fw_cfg USB boot: not set'
+
+# Verify Ubuntu boots (HDD boot due to resolution, no fw_cfg override)
+message 'TC-CTRL-3b: Verify VM boots from HDD (Ubuntu) - default with resolution set'
+exec -t 2m bash verify-boot-os-v2.sh {{template "test_vm"}} ubuntu
+stdout 'BOOT OS VERIFIED'
+message '=== TC-CTRL-3 PASSED ==='
+
+# ============================================================================
+# TC-CTRL-4: No resolution + boot_order=nousb -> HDD boot (Ubuntu)
+# fw_cfg="nousb" overrides OVMF default (which would boot USB without resolution)
+# Need to change resolution AND boot_order
+# ============================================================================
+message '=== TC-CTRL-4: Controller API - No resolution + boot_order=nousb -> Ubuntu (HDD boot) ==='
+
+# Remove FML resolution
+eden controller edge-node update --config app.fml.resolution=
+
+# Wait for EVE to pick up the resolution removal
+message 'Waiting for EVE to apply FML resolution removal...'
+exec -t 2m bash wait-fml-resolution-applied.sh ""
+
+# Modify VM boot order via controller API
+message 'Modifying VM boot_order to nousb via pod modify'
+eden pod modify {{template "test_vm"}} --boot-order=nousb
+
+# Restart VM to apply the new settings (resolution change + boot_order)
+message 'Restarting VM to apply boot_order=nousb with no resolution'
+eden pod stop {{template "test_vm"}}
+test eden.app.test -test.v -timewait 20m HALTED {{template "test_vm"}}
+eden pod start {{template "test_vm"}}
+test eden.app.test -test.v -timewait 10m RUNNING {{template "test_vm"}}
+
+# Record timestamp for log filtering
+exec bash record-timestamp.sh
+
+# Verify fw_cfg is set to "nousb" in hypervisor config
+message 'TC-CTRL-4a: Verify fw_cfg=nousb in hypervisor config'
+exec -t 2m bash verify-hypervisor-config-v2.sh $vm_uuid nousb
+stdout 'fw_cfg USB boot: nousb'
+
+# Verify Ubuntu boots (HDD boot due to fw_cfg=nousb overriding OVMF default)
+message 'TC-CTRL-4b: Verify VM boots from HDD (Ubuntu) - fw_cfg=nousb overrides OVMF default'
+exec -t 2m bash verify-boot-os-v2.sh {{template "test_vm"}} ubuntu
+stdout 'BOOT OS VERIFIED'
+message '=== TC-CTRL-4 PASSED ==='
+
+# Cleanup controller tests and prepare for next tests
+eden pod delete {{template "test_vm"}}
+test eden.app.test -test.v -timewait 5m - {{template "test_vm"}}
+
+message '========================================'
+message 'CONTROLLER API TESTS COMPLETED (TC-CTRL-1 to TC-CTRL-4)'
+message '========================================'
+
+# ############################################################################
+# PRIORITY TESTS (TC-PRIO-1 to TC-PRIO-3)
+# These tests verify the precedence order: LPS > Controller API > Device Property
+# Each test sets conflicting values at different levels to verify priority
+# ############################################################################
+
+# ============================================================================
+# TC-PRIO-1: Device=usb, Controller=nousb -> HDD boot (Controller overrides Device)
+# Device property says USB, but Controller per-app setting says nousb
+# Expected: Ubuntu boots (Controller wins over Device property)
+# ============================================================================
+message '=== TC-PRIO-1: Priority - Device=usb, Controller=nousb -> Ubuntu (Controller wins) ==='
+
+# Set device property to usb (would cause USB boot if used)
+eden controller edge-node update --config app.boot.order=usb
+
+# Wait for EVE to pick up the config
+message 'Waiting for EVE to apply device config...'
+exec sleep 15
+
+# Deploy test VM WITH per-app boot_order=nousb (should override device property)
+message 'Deploying test VM with --boot-order=nousb (should override device property=usb)'
+eden pod deploy -n {{template "test_vm"}} --memory=1024MB --vnc-display=1 --fml --boot-order=nousb -p {{template "vm_port"}}:22 --adapters $usb_adapter https://cloud-images.ubuntu.com/releases/focal/release-20210510/ubuntu-20.04-server-cloudimg-amd64.img --networks={{template "network"}}
+test eden.app.test -test.v -timewait 10m RUNNING {{template "test_vm"}}
+
+# Get test VM UUID
+exec bash get-vm-uuid.sh {{template "test_vm"}}
+source .env
+
+# Record timestamp for log filtering
+exec bash record-timestamp.sh
+
+# Verify fw_cfg is set to "nousb" (from Controller, not device property)
+message 'TC-PRIO-1a: Verify fw_cfg=nousb (Controller overrides device property=usb)'
+exec -t 2m bash verify-hypervisor-config-v2.sh $vm_uuid nousb
+stdout 'fw_cfg USB boot: nousb'
+
+# Verify Ubuntu boots (Controller wins, device property ignored)
+message 'TC-PRIO-1b: Verify VM boots from HDD (Ubuntu) - Controller beats Device property'
+exec -t 2m bash verify-boot-os-v2.sh {{template "test_vm"}} ubuntu
+stdout 'BOOT OS VERIFIED'
+message '=== TC-PRIO-1 PASSED ==='
+
+# Keep VM running for next test (we'll add LPS override)
+
+message '========================================'
+message 'PRIORITY TESTS COMPLETED (TC-PRIO-1)'
+message '========================================'
+
+# Clean up device property before LPS tests
+eden controller edge-node update --config app.boot.order=
+
+# Cleanup priority tests
+eden pod delete {{template "test_vm"}}
+test eden.app.test -test.v -timewait 5m - {{template "test_vm"}}
+
+# ############################################################################
+# PHASE 2: LPS TESTS (Local Profile Server Required)
+# These tests require LPS to be deployed, so they run here after LPS setup
+# ############################################################################
+
+# ############################################################################
+# LPS DEPLOYMENT
+# Deploy local-manager container which simulates LPS functionality
+# ############################################################################
 
 # Deploy local-manager (LPS simulator)
 eden pod deploy -n local-manager --memory=512MB {{template "eclient_image"}} -p {{template "port"}}:22 --networks={{template "network"}}
@@ -134,12 +561,919 @@ exec -t 2m bash verify-lps-endpoint.sh
 ! stdout 'ENDPOINT_ERROR'
 stdout 'LPS endpoint verified'
 
-# Detect USB harddrive on EVE dynamically
-# The USB topology can change, so we detect it at runtime
-message 'Detecting USB harddrive on EVE for passthrough'
-exec -t 1m bash detect-usb-harddrive.sh
+# USB detection already done before controller tests, reuse $usb_adapter from .env
+
+# ############################################################################
+# MAIN CUSTOMER USE CASE TEST (TC-INSTALL-1)
+# This is the PRIMARY customer scenario: Install OS to VM in FML mode from USB
+# The workflow uses the priority hierarchy: LPS > Controller > Device Property
+#   - Device property app.boot.order=nousb: Default HDD boot
+#   - LPS bootOrderConfig=usb: Temporarily enable USB boot for installation
+#   - LPS bootOrderConfig=UNSPECIFIED: Fall back to device property (post-install)
+#
+# Customer setup: 3 apps running - 2 FML VMs and 1 non-FML container
+# We verify the primary FML VM with USB passthrough (test_vm)
+# ############################################################################
+
+# ============================================================================
+# TC-INSTALL-1: OS Installation Workflow Simulation (Customer Use Case)
+# Simulates the customer use case of installing OS from USB to VM in FML mode:
+#   Step 0: Deploy 3 apps (2 FML VMs + 1 container) - customer typical setup
+#   Step 1: Device property=nousb -> HDD boot (normal operation)
+#   Step 2: LPS=usb overrides device property -> USB boot (install OS)
+#   Step 3: LPS=UNSPECIFIED -> falls back to device property -> HDD boot
+#
+# This is the EXACT workflow requested by the customer.
+# ============================================================================
+message '=== TC-INSTALL-1: OS Installation Workflow (Device=nousb, LPS=usb, LPS=UNSPECIFIED) ==='
+message 'This test validates the main customer use case for USB boot priority feature'
+message 'Customer setup: 2 FML VMs + 1 container running simultaneously'
+
+# Clean LPS state before test
+exec -t 1m bash clean-lps-state.sh
+
+# Set FML resolution for FML mode
+eden controller edge-node update --config app.fml.resolution=1024x768
+
+# Set device property to nousb (this is the default HDD boot policy)
+message 'Setting device property app.boot.order=nousb (default HDD boot policy)'
+eden controller edge-node update --config app.boot.order=nousb
+
+# Wait for EVE to pick up the config
+message 'Waiting for EVE to apply device config...'
+exec sleep 15
+exec -t 2m bash wait-fml-resolution-applied.sh 1024x768
+
+# ----------------------------------------------------------------------------
+# Step 0: Deploy 3 apps - typical customer setup
+# - test_vm: FML VM with USB passthrough (the one we'll test OS installation on)
+# - test_vm_2: Second FML VM (no USB, just to simulate customer workload)
+# - test_vm_3: Non-FML container (to verify boot order doesn't affect containers)
+# ----------------------------------------------------------------------------
+message 'TC-INSTALL-1 Step 0: Deploy 3 apps (2 FML VMs + 1 container)'
+
+# Deploy primary FML VM with USB passthrough
+message 'Deploying primary FML VM with USB passthrough (test_vm)'
+eden pod deploy -n {{template "test_vm"}} --memory=1024MB --vnc-display=1 --fml -p {{template "vm_port"}}:22 --adapters $usb_adapter https://cloud-images.ubuntu.com/releases/focal/release-20210510/ubuntu-20.04-server-cloudimg-amd64.img --networks={{template "network"}}
+
+# Deploy second FML VM (no USB)
+message 'Deploying second FML VM (test_vm_2)'
+eden pod deploy -n {{template "test_vm_2"}} --memory=512MB --vnc-display=2 --fml -p {{template "vm_port_2"}}:22 https://cloud-images.ubuntu.com/releases/focal/release-20210510/ubuntu-20.04-server-cloudimg-amd64.img --networks={{template "network"}}
+
+# Deploy non-FML container
+message 'Deploying non-FML container (test_vm_3)'
+eden pod deploy -n {{template "test_vm_3"}} --memory=256MB docker://nginx:alpine --networks={{template "network"}}
+
+# Wait for all apps to be running
+test eden.app.test -test.v -timewait 30m RUNNING {{template "test_vm"}}
+test eden.app.test -test.v -timewait 30m RUNNING {{template "test_vm_2"}}
+test eden.app.test -test.v -timewait 30m RUNNING {{template "test_vm_3"}}
+
+message 'All 3 apps deployed and running'
+
+# Get primary test VM UUID (the one we'll verify)
+exec bash get-vm-uuid.sh {{template "test_vm"}}
 source .env
-stdout 'USB_ADAPTER='
+
+# ----------------------------------------------------------------------------
+# Step 1: Verify default HDD boot (device property=nousb in effect)
+# This simulates normal operation before OS installation
+# ----------------------------------------------------------------------------
+message 'TC-INSTALL-1 Step 1: Verify HDD boot (device property=nousb)'
+
+# Record timestamp for log filtering
+exec bash record-timestamp.sh
+
+# Verify fw_cfg is set to "nousb" (from device property)
+message 'TC-INSTALL-1a: Verify fw_cfg=nousb (from device property)'
+exec -t 2m bash verify-hypervisor-config-v2.sh $vm_uuid nousb
+stdout 'fw_cfg USB boot: nousb'
+
+# Verify appbootinfo shows device property as source
+message 'TC-INSTALL-1a2: Verify appbootinfo shows DEVICE_PROPERTY as source'
+exec -t 3m bash verify-appbootinfo.sh $vm_uuid BOOT_ORDER_NOUSB BOOT_ORDER_SOURCE_DEVICE_PROPERTY
+stdout 'APPBOOTINFO_VERIFIED'
+
+# Verify Ubuntu boots from HDD (device property enforces HDD boot)
+message 'TC-INSTALL-1b: Verify VM boots from HDD (Ubuntu) - normal operation'
+exec -t 2m bash verify-boot-os-v2.sh {{template "test_vm"}} ubuntu
+stdout 'BOOT OS VERIFIED'
+message 'TC-INSTALL-1 Step 1 PASSED: Default HDD boot via device property works'
+
+# ----------------------------------------------------------------------------
+# Step 2: Set LPS bootOrderConfig=usb to boot from USB (OS installation)
+# Customer uses LPS to temporarily enable USB boot for OS installation
+# LPS overrides device property (priority: LPS > Controller > Device)
+# ----------------------------------------------------------------------------
+message 'TC-INSTALL-1 Step 2: Set LPS bootOrderConfig=usb (USB boot for installation)'
+exec -t 2m bash set-vm-boot-order.sh $vm_uuid usb
+exec -t 2m bash wait-vm-config-applied.sh
+
+# Verify appbootinfo shows LPS as source BEFORE restart
+message 'TC-INSTALL-1c0: Verify appbootinfo shows LPS as source BEFORE restart'
+exec -t 3m bash verify-appbootinfo.sh $vm_uuid BOOT_ORDER_USB BOOT_ORDER_SOURCE_LPS
+stdout 'APPBOOTINFO_VERIFIED'
+
+# Restart VM to boot from USB (simulates reboot for installation)
+message 'Restarting VM to boot from USB (installation mode)'
+eden pod stop {{template "test_vm"}}
+test eden.app.test -test.v -timewait 20m HALTED {{template "test_vm"}}
+eden pod start {{template "test_vm"}}
+exec -t 5m bash wait-for-running-once.sh {{template "test_vm"}}
+
+# Record timestamp for log filtering
+exec bash record-timestamp.sh
+
+# Verify fw_cfg is set to "usb" (LPS overrides device property)
+message 'TC-INSTALL-1c: Verify fw_cfg=usb (LPS overrides device property=nousb)'
+exec -t 2m bash verify-hypervisor-config-v2.sh $vm_uuid usb
+stdout 'fw_cfg USB boot: usb'
+
+# Verify appbootinfo shows LPS as source after restart
+message 'TC-INSTALL-1c2: Verify appbootinfo shows LPS as source'
+exec -t 3m bash verify-appbootinfo.sh $vm_uuid BOOT_ORDER_USB BOOT_ORDER_SOURCE_LPS
+stdout 'APPBOOTINFO_VERIFIED'
+
+# Verify Debian boots from USB (LPS forces USB boot for installation)
+message 'TC-INSTALL-1d: Verify VM boots from USB (Debian) - installation mode'
+exec -t 2m bash verify-boot-os-v2.sh {{template "test_vm"}} debian
+stdout 'BOOT OS VERIFIED'
+message 'TC-INSTALL-1 Step 2 PASSED: LPS USB boot for installation works'
+
+# ----------------------------------------------------------------------------
+# Step 3: Set LPS to UNSPECIFIED to fall back to device property (post-install)
+# Customer sets LPS boot order to UNSPECIFIED after installation completes
+# VM falls back to device property=nousb -> HDD boot
+# Using "unspecified" which maps to BOOT_ORDER_UNSPECIFIED enum
+# ----------------------------------------------------------------------------
+message 'TC-INSTALL-1 Step 3: Set LPS=UNSPECIFIED (fall back to device property=nousb)'
+exec -t 2m bash set-vm-boot-order.sh $vm_uuid unspecified
+exec -t 2m bash wait-vm-config-applied.sh
+
+# Verify appbootinfo shows device property as source BEFORE restart
+message 'TC-INSTALL-1e0: Verify appbootinfo shows DEVICE_PROPERTY BEFORE restart'
+exec -t 3m bash verify-appbootinfo.sh $vm_uuid BOOT_ORDER_NOUSB BOOT_ORDER_SOURCE_DEVICE_PROPERTY
+stdout 'APPBOOTINFO_VERIFIED'
+
+# Restart VM to boot from HDD (post-installation)
+message 'Restarting VM to boot from HDD (post-installation)'
+eden pod stop {{template "test_vm"}}
+test eden.app.test -test.v -timewait 20m HALTED {{template "test_vm"}}
+eden pod start {{template "test_vm"}}
+test eden.app.test -test.v -timewait 10m RUNNING {{template "test_vm"}}
+
+# Record timestamp for log filtering
+exec bash record-timestamp.sh
+
+# Verify fw_cfg is set to "nousb" (back to device property after LPS=UNSPECIFIED)
+message 'TC-INSTALL-1e: Verify fw_cfg=nousb (device property after LPS=UNSPECIFIED)'
+exec -t 2m bash verify-hypervisor-config-v2.sh $vm_uuid nousb
+stdout 'fw_cfg USB boot: nousb'
+
+# Verify appbootinfo shows device property as source after restart
+message 'TC-INSTALL-1e2: Verify appbootinfo shows DEVICE_PROPERTY after restart'
+exec -t 3m bash verify-appbootinfo.sh $vm_uuid BOOT_ORDER_NOUSB BOOT_ORDER_SOURCE_DEVICE_PROPERTY
+stdout 'APPBOOTINFO_VERIFIED'
+
+# Verify Ubuntu boots from HDD (device property takes effect after LPS=UNSPECIFIED)
+message 'TC-INSTALL-1f: Verify VM boots from HDD (Ubuntu) - post-installation'
+exec -t 2m bash verify-boot-os-v2.sh {{template "test_vm"}} ubuntu
+stdout 'BOOT OS VERIFIED'
+message 'TC-INSTALL-1 Step 3 PASSED: HDD boot after installation works'
+
+message '=== TC-INSTALL-1 PASSED: Complete OS installation workflow validated ==='
+message '  - Step 0: 3 apps deployed (2 FML VMs + 1 container) - VERIFIED'
+message '  - Step 1: Device property=nousb -> HDD boot (Ubuntu) - VERIFIED'
+message '  - Step 2: LPS=usb overrides -> USB boot (Debian) - VERIFIED'
+message '  - Step 3: LPS=UNSPECIFIED -> Device property -> HDD boot (Ubuntu) - VERIFIED'
+message 'Customer use case for USB boot priority feature is fully validated!'
+
+# Cleanup TC-INSTALL-1 - delete all VMs and clean device property for next tests
+eden pod delete {{template "test_vm"}}
+test eden.app.test -test.v -timewait 5m - {{template "test_vm"}}
+eden pod delete {{template "test_vm_2"}}
+test eden.app.test -test.v -timewait 5m - {{template "test_vm_2"}}
+eden pod delete {{template "test_vm_3"}}
+test eden.app.test -test.v -timewait 5m - {{template "test_vm_3"}}
+eden controller edge-node update --config app.boot.order=
+
+message '========================================'
+message 'MAIN CUSTOMER USE CASE TEST COMPLETED (TC-INSTALL-1)'
+message '========================================'
+
+# ############################################################################
+# PRIORITY TESTS WITH LPS (TC-PRIO-2 to TC-PRIO-3)
+# These tests require LPS to be deployed, so they run here after LPS setup
+# ############################################################################
+
+# ============================================================================
+# TC-PRIO-2: Device=usb, Controller=nousb, LPS=usb -> USB boot (LPS wins)
+# All three levels are set to conflicting values
+# Expected: Debian boots (LPS has highest priority)
+# ============================================================================
+message '=== TC-PRIO-2: Priority - Device=usb, Controller=nousb, LPS=usb -> Debian (LPS wins) ==='
+
+# Clean LPS state before test
+exec -t 1m bash clean-lps-state.sh
+
+# Set device property to usb
+eden controller edge-node update --config app.boot.order=usb
+
+# Wait for EVE to pick up the config
+message 'Waiting for EVE to apply device config...'
+exec sleep 15
+
+# Deploy test VM WITH per-app boot_order=nousb (Controller says nousb)
+message 'Deploying test VM with --boot-order=nousb (Controller=nousb, Device=usb)'
+eden pod deploy -n {{template "test_vm"}} --memory=1024MB --vnc-display=1 --fml --boot-order=nousb -p {{template "vm_port"}}:22 --adapters $usb_adapter https://cloud-images.ubuntu.com/releases/focal/release-20210510/ubuntu-20.04-server-cloudimg-amd64.img --networks={{template "network"}}
+test eden.app.test -test.v -timewait 10m RUNNING {{template "test_vm"}}
+
+# Get test VM UUID
+exec bash get-vm-uuid.sh {{template "test_vm"}}
+source .env
+
+# At this point: Device=usb, Controller=nousb, LPS=unset
+# Without LPS, Controller should win and VM boots from HDD (Ubuntu)
+# Verify this baseline before adding LPS override
+
+# Record timestamp for log filtering
+exec bash record-timestamp.sh
+
+# Verify fw_cfg is set to "nousb" (Controller wins over device property for now)
+message 'TC-PRIO-2a: Baseline - Controller=nousb wins over Device=usb (before LPS)'
+exec -t 2m bash verify-hypervisor-config-v2.sh $vm_uuid nousb
+stdout 'fw_cfg USB boot: nousb'
+
+# Verify Ubuntu boots (Controller wins)
+message 'TC-PRIO-2b: Baseline - VM boots from HDD (Ubuntu) before LPS override'
+exec -t 2m bash verify-boot-os-v2.sh {{template "test_vm"}} ubuntu
+stdout 'BOOT OS VERIFIED'
+
+# Now set LPS to usb (should override both Device and Controller)
+message 'TC-PRIO-2c: Setting LPS bootOrderConfig=usb to override Controller=nousb'
+exec -t 2m bash set-vm-boot-order.sh $vm_uuid usb
+exec -t 2m bash wait-vm-config-applied.sh
+
+# Restart VM to apply LPS setting
+message 'Restarting VM to apply LPS bootOrderConfig=usb'
+eden pod stop {{template "test_vm"}}
+test eden.app.test -test.v -timewait 20m HALTED {{template "test_vm"}}
+eden pod start {{template "test_vm"}}
+exec -t 5m bash wait-for-running-once.sh {{template "test_vm"}}
+
+# Record timestamp for log filtering
+exec bash record-timestamp.sh
+
+# Verify fw_cfg is now "usb" (LPS overrides Controller)
+message 'TC-PRIO-2d: Verify fw_cfg=usb (LPS overrides Controller=nousb and Device=usb)'
+exec -t 2m bash verify-hypervisor-config-v2.sh $vm_uuid usb
+stdout 'fw_cfg USB boot: usb'
+
+# Verify Debian boots (LPS wins)
+message 'TC-PRIO-2e: Verify VM boots from USB (Debian) - LPS beats Controller and Device'
+exec -t 2m bash verify-boot-os-v2.sh {{template "test_vm"}} debian
+stdout 'BOOT OS VERIFIED'
+
+# Verify appbootinfo reports LPS as the source
+message 'TC-PRIO-2f: Verify appbootinfo shows source=LPS'
+exec -t 3m bash verify-appbootinfo.sh $vm_uuid BOOT_ORDER_USB BOOT_ORDER_SOURCE_LPS
+stdout 'APPBOOTINFO_VERIFIED'
+message '=== TC-PRIO-2 PASSED ==='
+
+# ============================================================================
+# TC-PRIO-4: LPS clear -> fallback to Controller
+# This tests that when LPS clears its override, the app immediately falls back
+# to the Controller boot order (without needing a new controller config).
+# Setup: Controller=nousb, LPS=usb (from TC-PRIO-2)
+# Action: Remove app from LPS response (clear LPS override)
+# Expected: Ubuntu boots (falls back to Controller=nousb)
+# IMPORTANT: We verify appbootinfo BEFORE restart to ensure the value is correct
+# at the moment of decision, not after a restart/reparse.
+# ============================================================================
+message '=== TC-PRIO-4: LPS Clear - Falls back to Controller ==='
+
+# At this point from TC-PRIO-2: Controller=nousb, LPS=usb, VM is running with USB boot
+# Now clear LPS by removing this app from the response
+message 'TC-PRIO-4a: Clearing LPS override (removing app from LPS response)'
+exec -t 2m bash set-lps-config-for-other-app.sh
+exec -t 2m bash wait-vm-config-applied.sh
+
+# CRITICAL: Verify appbootinfo BEFORE restart - this catches the bug where
+# the value isn't updated until next controller config parse
+message 'TC-PRIO-4b: Verify appbootinfo shows Controller BEFORE restart (catches cache bug)'
+exec -t 3m bash verify-appbootinfo.sh $vm_uuid BOOT_ORDER_NOUSB BOOT_ORDER_SOURCE_CONTROLLER
+stdout 'APPBOOTINFO_VERIFIED'
+
+# Restart VM to apply the cleared LPS setting
+message 'TC-PRIO-4c: Restarting VM to apply LPS clear'
+eden pod stop {{template "test_vm"}}
+test eden.app.test -test.v -timewait 20m HALTED {{template "test_vm"}}
+eden pod start {{template "test_vm"}}
+test eden.app.test -test.v -timewait 10m RUNNING {{template "test_vm"}}
+
+# Record timestamp for log filtering
+exec bash record-timestamp.sh
+
+# Verify fw_cfg is now "nousb" (LPS cleared, falls back to Controller)
+message 'TC-PRIO-4d: Verify fw_cfg=nousb (LPS cleared, Controller wins)'
+exec -t 2m bash verify-hypervisor-config-v2.sh $vm_uuid nousb
+stdout 'fw_cfg USB boot: nousb'
+
+# Verify Ubuntu boots (Controller wins after LPS clear)
+message 'TC-PRIO-4e: Verify VM boots from HDD (Ubuntu) - Controller wins after LPS clear'
+exec -t 2m bash verify-boot-os-v2.sh {{template "test_vm"}} ubuntu
+stdout 'BOOT OS VERIFIED'
+
+# Verify appbootinfo again after restart (should still be Controller)
+message 'TC-PRIO-4f: Verify appbootinfo shows source=CONTROLLER after restart'
+exec -t 3m bash verify-appbootinfo.sh $vm_uuid BOOT_ORDER_NOUSB BOOT_ORDER_SOURCE_CONTROLLER
+stdout 'APPBOOTINFO_VERIFIED'
+message '=== TC-PRIO-4 PASSED ==='
+
+# Cleanup TC-PRIO-4
+eden pod delete {{template "test_vm"}}
+test eden.app.test -test.v -timewait 5m - {{template "test_vm"}}
+
+# ============================================================================
+# TC-PRIO-3: Device=nousb, Controller="", LPS="" -> HDD boot (Device default used)
+# Only device property is set, Controller and LPS are empty
+# Expected: Ubuntu boots (Device property is used as fallback)
+# ============================================================================
+message '=== TC-PRIO-3: Priority - Device=nousb, Controller="", LPS="" -> Ubuntu (Device fallback) ==='
+
+# Clean LPS state before test
+exec -t 1m bash clean-lps-state.sh
+
+# Set device property to nousb
+eden controller edge-node update --config app.boot.order=nousb
+
+# Wait for EVE to pick up the config
+message 'Waiting for EVE to apply device config...'
+exec sleep 15
+
+# Deploy test VM WITHOUT per-app boot_order (Controller empty)
+# LPS is also not set for this app
+message 'Deploying test VM without per-app boot_order (Device=nousb should apply)'
+eden pod deploy -n {{template "test_vm"}} --memory=1024MB --vnc-display=1 --fml -p {{template "vm_port"}}:22 --adapters $usb_adapter https://cloud-images.ubuntu.com/releases/focal/release-20210510/ubuntu-20.04-server-cloudimg-amd64.img --networks={{template "network"}}
+test eden.app.test -test.v -timewait 10m RUNNING {{template "test_vm"}}
+
+# Get test VM UUID
+exec bash get-vm-uuid.sh {{template "test_vm"}}
+source .env
+
+# Record timestamp for log filtering
+exec bash record-timestamp.sh
+
+# Verify fw_cfg is set to "nousb" (from device property as fallback)
+message 'TC-PRIO-3a: Verify fw_cfg=nousb (Device property used as fallback)'
+exec -t 2m bash verify-hypervisor-config-v2.sh $vm_uuid nousb
+stdout 'fw_cfg USB boot: nousb'
+
+# Verify Ubuntu boots (Device property fallback)
+message 'TC-PRIO-3b: Verify VM boots from HDD (Ubuntu) - Device property as fallback'
+exec -t 2m bash verify-boot-os-v2.sh {{template "test_vm"}} ubuntu
+stdout 'BOOT OS VERIFIED'
+
+# Verify appbootinfo reports DeviceProperty as the source
+message 'TC-PRIO-3c: Verify appbootinfo shows source=DEVICE_PROPERTY'
+exec -t 3m bash verify-appbootinfo.sh $vm_uuid BOOT_ORDER_NOUSB BOOT_ORDER_SOURCE_DEVICE_PROPERTY
+stdout 'APPBOOTINFO_VERIFIED'
+
+# ============================================================================
+# TC-PRIO-5: LPS explicit UNSPECIFIED -> fallback to Device Property
+# This tests that when LPS sends explicit BOOT_ORDER_UNSPECIFIED, the app
+# correctly falls back to Device Property (since Controller is empty).
+# Reuses the VM from TC-PRIO-3 which has Controller="", Device=nousb
+# ============================================================================
+message '=== TC-PRIO-5: LPS explicit UNSPECIFIED - Falls back to DeviceProperty ==='
+
+# First set LPS to USB to establish an LPS override
+message 'TC-PRIO-5a: Setting LPS=USB to establish override'
+exec -t 2m bash set-vm-boot-order.sh $vm_uuid usb
+exec -t 2m bash wait-vm-config-applied.sh
+
+# Verify appbootinfo BEFORE restart - LPS should take effect immediately
+message 'TC-PRIO-5a2: Verify appbootinfo shows LPS BEFORE restart'
+exec -t 3m bash verify-appbootinfo.sh $vm_uuid BOOT_ORDER_USB BOOT_ORDER_SOURCE_LPS
+stdout 'APPBOOTINFO_VERIFIED'
+
+# Restart to apply LPS=USB
+eden pod stop {{template "test_vm"}}
+test eden.app.test -test.v -timewait 20m HALTED {{template "test_vm"}}
+eden pod start {{template "test_vm"}}
+test eden.app.test -test.v -timewait 10m RUNNING {{template "test_vm"}}
+
+# Verify LPS=USB took effect
+message 'TC-PRIO-5b: Verify LPS=USB took effect'
+exec -t 2m bash verify-hypervisor-config-v2.sh $vm_uuid usb
+stdout 'fw_cfg USB boot: usb'
+
+# Now send explicit UNSPECIFIED (different from removing from response)
+message 'TC-PRIO-5c: Sending LPS explicit BOOT_ORDER_UNSPECIFIED'
+exec -t 2m bash set-vm-boot-order.sh $vm_uuid ""
+exec -t 2m bash wait-vm-config-applied.sh
+
+# CRITICAL: Verify appbootinfo BEFORE restart - this catches the bug where
+# explicit UNSPECIFIED doesn't properly clear the LPS cache
+message 'TC-PRIO-5d: Verify appbootinfo shows DeviceProperty BEFORE restart (catches cache bug)'
+exec -t 3m bash verify-appbootinfo.sh $vm_uuid BOOT_ORDER_NOUSB BOOT_ORDER_SOURCE_DEVICE_PROPERTY
+stdout 'APPBOOTINFO_VERIFIED'
+
+# Restart to apply LPS clear
+eden pod stop {{template "test_vm"}}
+test eden.app.test -test.v -timewait 20m HALTED {{template "test_vm"}}
+eden pod start {{template "test_vm"}}
+test eden.app.test -test.v -timewait 10m RUNNING {{template "test_vm"}}
+
+# Record timestamp for log filtering
+exec bash record-timestamp.sh
+
+# Verify fw_cfg is now "nousb" (LPS=UNSPECIFIED, falls back to Device)
+message 'TC-PRIO-5e: Verify fw_cfg=nousb (LPS UNSPECIFIED, falls back to Device)'
+exec -t 2m bash verify-hypervisor-config-v2.sh $vm_uuid nousb
+stdout 'fw_cfg USB boot: nousb'
+
+# Verify Ubuntu boots
+message 'TC-PRIO-5f: Verify VM boots from HDD (Ubuntu) - Device wins after LPS UNSPECIFIED'
+exec -t 2m bash verify-boot-os-v2.sh {{template "test_vm"}} ubuntu
+stdout 'BOOT OS VERIFIED'
+
+# Verify appbootinfo again after restart (should still be DeviceProperty)
+message 'TC-PRIO-5g: Verify appbootinfo shows source=DEVICE_PROPERTY after restart'
+exec -t 3m bash verify-appbootinfo.sh $vm_uuid BOOT_ORDER_NOUSB BOOT_ORDER_SOURCE_DEVICE_PROPERTY
+stdout 'APPBOOTINFO_VERIFIED'
+message '=== TC-PRIO-5 PASSED ==='
+
+message '=== TC-PRIO-3 PASSED ==='
+
+# Cleanup TC-PRIO-3
+eden pod delete {{template "test_vm"}}
+test eden.app.test -test.v -timewait 5m - {{template "test_vm"}}
+
+# Clean up device property before regular LPS tests
+eden controller edge-node update --config app.boot.order=
+
+message '========================================'
+message 'ALL PRIORITY TESTS COMPLETED (TC-PRIO-1 to TC-PRIO-3)'
+message '========================================'
+
+# ############################################################################
+# EMPTY STRING EDGE CASE TESTS (TC-EMPTY-1 to TC-EMPTY-5)
+# These tests verify that empty string ("") means "no override" at each level
+# and that LPS 404 / app-not-in-response / usb_boot="" are handled correctly
+# ############################################################################
+
+# ============================================================================
+# TC-EMPTY-1: Device=usb, Controller="" -> USB boot (Controller empty = no override)
+# Controller has empty boot_order, should fall back to Device property
+# Expected: Debian boots (Device property usb is used)
+# ============================================================================
+message '=== TC-EMPTY-1: Empty String - Device=usb, Controller="" -> Debian (Device used) ==='
+
+# Set device property to usb
+eden controller edge-node update --config app.boot.order=usb
+
+# Wait for EVE to pick up the config
+message 'Waiting for EVE to apply device config...'
+exec sleep 15
+
+# Deploy test VM WITHOUT per-app boot_order (Controller empty)
+message 'Deploying test VM without --boot-order (Controller="", Device=usb)'
+eden pod deploy -n {{template "test_vm"}} --memory=1024MB --vnc-display=1 --fml -p {{template "vm_port"}}:22 --adapters $usb_adapter https://cloud-images.ubuntu.com/releases/focal/release-20210510/ubuntu-20.04-server-cloudimg-amd64.img --networks={{template "network"}}
+
+# USB boot VM may become unstable - use custom polling
+exec -t 5m bash wait-for-running-once.sh {{template "test_vm"}}
+
+# Get test VM UUID
+exec bash get-vm-uuid.sh {{template "test_vm"}}
+source .env
+
+# Record timestamp for log filtering
+exec bash record-timestamp.sh
+
+# Verify fw_cfg is set to "usb" (from device property, Controller was empty)
+message 'TC-EMPTY-1a: Verify fw_cfg=usb (Controller="" falls back to Device=usb)'
+exec -t 2m bash verify-hypervisor-config-v2.sh $vm_uuid usb
+stdout 'fw_cfg USB boot: usb'
+
+# Verify Debian boots (Device property used because Controller is empty)
+message 'TC-EMPTY-1b: Verify VM boots from USB (Debian) - Controller empty, Device wins'
+exec -t 2m bash verify-boot-os-v2.sh {{template "test_vm"}} debian
+stdout 'BOOT OS VERIFIED'
+message '=== TC-EMPTY-1 PASSED ==='
+
+# Cleanup TC-EMPTY-1
+eden pod delete {{template "test_vm"}}
+test eden.app.test -test.v -timewait 5m - {{template "test_vm"}}
+
+# ============================================================================
+# TC-EMPTY-2: Device=usb, Controller=nousb, LPS usb_boot="" -> HDD boot
+# LPS has app in response but with EXPLICIT empty usb_boot=""
+# Expected: Ubuntu boots (LPS usb_boot="" = no override, Controller wins)
+# ============================================================================
+message '=== TC-EMPTY-2: LPS usb_boot="" - Device=usb, Controller=nousb, LPS="" -> Ubuntu ==='
+
+# Device property is still usb from previous test
+
+# Deploy test VM WITH per-app boot_order=nousb
+message 'Deploying test VM with --boot-order=nousb (Controller=nousb, Device=usb)'
+eden pod deploy -n {{template "test_vm"}} --memory=1024MB --vnc-display=1 --fml --boot-order=nousb -p {{template "vm_port"}}:22 --adapters $usb_adapter https://cloud-images.ubuntu.com/releases/focal/release-20210510/ubuntu-20.04-server-cloudimg-amd64.img --networks={{template "network"}}
+test eden.app.test -test.v -timewait 10m RUNNING {{template "test_vm"}}
+
+# Get test VM UUID
+exec bash get-vm-uuid.sh {{template "test_vm"}}
+source .env
+
+# Record timestamp for log filtering
+exec bash record-timestamp.sh
+
+# Verify baseline: Controller=nousb wins over Device=usb
+message 'TC-EMPTY-2a: Baseline - Controller=nousb wins over Device=usb'
+exec -t 2m bash verify-hypervisor-config-v2.sh $vm_uuid nousb
+stdout 'fw_cfg USB boot: nousb'
+
+# Now set LPS to EXPLICIT empty string for this app (should NOT override)
+# This sends: { "app_configs": [{ "id": "<uuid>", "usb_boot": "" }] }
+message 'TC-EMPTY-2b: Setting LPS usb_boot="" explicitly (empty = no override)'
+exec -t 2m bash set-vm-boot-order.sh $vm_uuid ""
+exec -t 2m bash wait-vm-config-applied.sh
+
+# Verify appbootinfo shows Controller as source (LPS usb_boot="" means no override)
+exec -t 3m bash verify-appbootinfo.sh $vm_uuid BOOT_ORDER_NOUSB BOOT_ORDER_SOURCE_CONTROLLER
+
+# Restart VM to apply
+message 'Restarting VM to verify LPS usb_boot="" does not override Controller'
+eden pod stop {{template "test_vm"}}
+test eden.app.test -test.v -timewait 20m HALTED {{template "test_vm"}}
+eden pod start {{template "test_vm"}}
+test eden.app.test -test.v -timewait 10m RUNNING {{template "test_vm"}}
+
+# Record timestamp for log filtering
+exec bash record-timestamp.sh
+
+# Verify fw_cfg is still "nousb" (LPS usb_boot="" = no override, Controller wins)
+message 'TC-EMPTY-2c: Verify fw_cfg=nousb (LPS usb_boot="" does not override Controller)'
+exec -t 2m bash verify-hypervisor-config-v2.sh $vm_uuid nousb
+stdout 'fw_cfg USB boot: nousb'
+
+# Verify Ubuntu boots (Controller wins because LPS usb_boot is empty)
+message 'TC-EMPTY-2d: Verify VM boots from HDD (Ubuntu) - LPS usb_boot="", Controller wins'
+exec -t 2m bash verify-boot-os-v2.sh {{template "test_vm"}} ubuntu
+stdout 'BOOT OS VERIFIED'
+message '=== TC-EMPTY-2 PASSED ==='
+
+# Cleanup TC-EMPTY-2
+eden pod delete {{template "test_vm"}}
+test eden.app.test -test.v -timewait 5m - {{template "test_vm"}}
+
+# ============================================================================
+# TC-EMPTY-3: Device=usb, Controller=nousb, LPS app NOT in response -> HDD boot
+# LPS returns 200 with app_configs but THIS app is NOT in the list
+# Expected: Ubuntu boots (app not in LPS = no override, Controller wins)
+# ============================================================================
+message '=== TC-EMPTY-3: LPS app not in response - Controller wins ==='
+
+# Deploy test VM WITH per-app boot_order=nousb
+message 'Deploying test VM with --boot-order=nousb'
+eden pod deploy -n {{template "test_vm"}} --memory=1024MB --vnc-display=1 --fml --boot-order=nousb -p {{template "vm_port"}}:22 --adapters $usb_adapter https://cloud-images.ubuntu.com/releases/focal/release-20210510/ubuntu-20.04-server-cloudimg-amd64.img --networks={{template "network"}}
+test eden.app.test -test.v -timewait 10m RUNNING {{template "test_vm"}}
+
+# Get test VM UUID
+exec bash get-vm-uuid.sh {{template "test_vm"}}
+source .env
+
+# Record timestamp for log filtering
+exec bash record-timestamp.sh
+
+# Set LPS to return config for a DIFFERENT app (not this VM)
+# This simulates: app exists in LPS but THIS specific VM is not configured
+message 'TC-EMPTY-3a: Setting LPS config for different app (this VM not in response)'
+exec -t 2m bash set-lps-config-for-other-app.sh
+exec -t 2m bash wait-vm-config-applied.sh
+
+# Verify appbootinfo shows Controller as source (app not in LPS response)
+exec -t 3m bash verify-appbootinfo.sh $vm_uuid BOOT_ORDER_NOUSB BOOT_ORDER_SOURCE_CONTROLLER
+
+# Restart VM to apply
+message 'Restarting VM to verify app-not-in-LPS uses Controller'
+eden pod stop {{template "test_vm"}}
+test eden.app.test -test.v -timewait 20m HALTED {{template "test_vm"}}
+eden pod start {{template "test_vm"}}
+test eden.app.test -test.v -timewait 10m RUNNING {{template "test_vm"}}
+
+# Record timestamp for log filtering
+exec bash record-timestamp.sh
+
+# Verify fw_cfg is "nousb" (app not in LPS response, Controller wins)
+message 'TC-EMPTY-3b: Verify fw_cfg=nousb (app not in LPS, Controller wins)'
+exec -t 2m bash verify-hypervisor-config-v2.sh $vm_uuid nousb
+stdout 'fw_cfg USB boot: nousb'
+
+# Verify Ubuntu boots
+message 'TC-EMPTY-3c: Verify VM boots from HDD (Ubuntu) - app not in LPS, Controller wins'
+exec -t 2m bash verify-boot-os-v2.sh {{template "test_vm"}} ubuntu
+stdout 'BOOT OS VERIFIED'
+message '=== TC-EMPTY-3 PASSED ==='
+
+# Cleanup TC-EMPTY-3
+eden pod delete {{template "test_vm"}}
+test eden.app.test -test.v -timewait 5m - {{template "test_vm"}}
+
+# Clean LPS state
+exec -t 1m bash clean-lps-state.sh
+
+# ============================================================================
+# TC-EMPTY-4: Device="", Controller="", LPS 404 -> OVMF default
+# LPS returns 404 (no config), all other sources empty
+# With no resolution set, OVMF default is USB priority -> Debian boots
+# ============================================================================
+message '=== TC-EMPTY-4: LPS 404, all empty -> OVMF default (USB priority) ==='
+
+# Clear device property
+eden controller edge-node update --config app.boot.order=
+
+# Clear FML resolution (so OVMF default USB priority applies)
+eden controller edge-node update --config app.fml.resolution=
+
+# Set LPS to return 404
+message 'TC-EMPTY-4a: Setting LPS to return 404'
+exec -t 2m bash set-lps-return-404.sh
+
+# Wait for EVE to pick up the config and LPS 404
+message 'Waiting for EVE to apply empty configs and receive LPS 404...'
+exec sleep 15
+
+# Deploy test VM WITHOUT per-app boot_order (all sources empty/404)
+message 'Deploying test VM with all boot order sources empty/404'
+eden pod deploy -n {{template "test_vm"}} --memory=1024MB --vnc-display=1 --fml -p {{template "vm_port"}}:22 --adapters $usb_adapter https://cloud-images.ubuntu.com/releases/focal/release-20210510/ubuntu-20.04-server-cloudimg-amd64.img --networks={{template "network"}}
+
+# USB boot VM may become unstable - use custom polling
+exec -t 5m bash wait-for-running-once.sh {{template "test_vm"}}
+
+# Get test VM UUID
+exec bash get-vm-uuid.sh {{template "test_vm"}}
+source .env
+
+# Record timestamp for log filtering
+exec bash record-timestamp.sh
+
+# Verify NO fw_cfg is set (all sources empty, LPS 404)
+message 'TC-EMPTY-4b: Verify NO fw_cfg set (LPS 404, all sources empty)'
+exec -t 2m bash verify-hypervisor-config-v2.sh $vm_uuid none
+stdout 'fw_cfg USB boot: not set'
+
+# Verify Debian boots (OVMF default USB priority without resolution set)
+message 'TC-EMPTY-4c: Verify VM boots from USB (Debian) - OVMF default USB priority'
+exec -t 2m bash verify-boot-os-v2.sh {{template "test_vm"}} debian
+stdout 'BOOT OS VERIFIED'
+message '=== TC-EMPTY-4 PASSED ==='
+
+# Cleanup TC-EMPTY-4
+eden pod delete {{template "test_vm"}}
+test eden.app.test -test.v -timewait 5m - {{template "test_vm"}}
+
+# Restore LPS to normal (not 404)
+exec -t 1m bash clean-lps-state.sh
+
+# ============================================================================
+# TC-EMPTY-5: Device=nousb, Controller=usb, LPS 404 -> USB boot (LPS 404, Controller wins)
+# LPS returns 404 (no config at all), should use Controller
+# Expected: Debian boots (LPS 404 = no LPS, Controller usb wins)
+# ============================================================================
+message '=== TC-EMPTY-5: LPS 404 - Device=nousb, Controller=usb -> Debian (Controller wins) ==='
+
+# Set device property to nousb (would cause HDD boot if used)
+eden controller edge-node update --config app.boot.order=nousb
+
+# Set LPS to return 404
+message 'TC-EMPTY-5a: Setting LPS to return 404'
+exec -t 2m bash set-lps-return-404.sh
+
+# Wait for EVE to pick up the config
+message 'Waiting for EVE to apply device config and LPS 404...'
+exec sleep 15
+
+# Deploy test VM WITH per-app boot_order=usb (Controller overrides Device)
+message 'Deploying test VM with --boot-order=usb (Controller=usb, Device=nousb, LPS=404)'
+eden pod deploy -n {{template "test_vm"}} --memory=1024MB --vnc-display=1 --fml --boot-order=usb -p {{template "vm_port"}}:22 --adapters $usb_adapter https://cloud-images.ubuntu.com/releases/focal/release-20210510/ubuntu-20.04-server-cloudimg-amd64.img --networks={{template "network"}}
+
+# USB boot VM may become unstable - use custom polling
+exec -t 5m bash wait-for-running-once.sh {{template "test_vm"}}
+
+# Get test VM UUID
+exec bash get-vm-uuid.sh {{template "test_vm"}}
+source .env
+
+# Record timestamp for log filtering
+exec bash record-timestamp.sh
+
+# Verify fw_cfg is "usb" (LPS 404, Controller wins over Device)
+message 'TC-EMPTY-5b: Verify fw_cfg=usb (LPS 404, Controller=usb wins)'
+exec -t 2m bash verify-hypervisor-config-v2.sh $vm_uuid usb
+stdout 'fw_cfg USB boot: usb'
+
+# Verify Debian boots (Controller wins because LPS returns 404)
+message 'TC-EMPTY-5c: Verify VM boots from USB (Debian) - LPS 404, Controller wins'
+exec -t 2m bash verify-boot-os-v2.sh {{template "test_vm"}} debian
+stdout 'BOOT OS VERIFIED'
+message '=== TC-EMPTY-5 PASSED ==='
+
+# Cleanup TC-EMPTY-5
+eden pod delete {{template "test_vm"}}
+test eden.app.test -test.v -timewait 5m - {{template "test_vm"}}
+
+# ============================================================================
+# TC-EMPTY-6: Device=usb, Controller="", LPS 404 -> USB boot
+# LPS returns 404, Controller is empty, should fall back to Device property
+# Expected: Debian boots (LPS 404, Controller "", Device usb wins)
+# ============================================================================
+message '=== TC-EMPTY-6: LPS 404, Controller="" -> Device fallback (USB boot) ==='
+
+# Set device property to usb
+eden controller edge-node update --config app.boot.order=usb
+
+# Set LPS to return 404
+message 'TC-EMPTY-6a: Setting LPS to return 404'
+exec -t 2m bash set-lps-return-404.sh
+
+# Wait for EVE to pick up the config
+message 'Waiting for EVE to apply device config and LPS 404...'
+exec sleep 15
+
+# Deploy test VM WITHOUT per-app boot_order (Controller="")
+message 'Deploying test VM without --boot-order (Controller="", Device=usb, LPS=404)'
+eden pod deploy -n {{template "test_vm"}} --memory=1024MB --vnc-display=1 --fml -p {{template "vm_port"}}:22 --adapters $usb_adapter https://cloud-images.ubuntu.com/releases/focal/release-20210510/ubuntu-20.04-server-cloudimg-amd64.img --networks={{template "network"}}
+
+# USB boot VM may become unstable - use custom polling
+exec -t 5m bash wait-for-running-once.sh {{template "test_vm"}}
+
+# Get test VM UUID
+exec bash get-vm-uuid.sh {{template "test_vm"}}
+source .env
+
+# Record timestamp for log filtering
+exec bash record-timestamp.sh
+
+# Verify fw_cfg is "usb" (LPS 404, Controller "", Device usb wins)
+message 'TC-EMPTY-6b: Verify fw_cfg=usb (LPS 404, Controller="", Device=usb wins)'
+exec -t 2m bash verify-hypervisor-config-v2.sh $vm_uuid usb
+stdout 'fw_cfg USB boot: usb'
+
+# Verify Debian boots (Device property wins because LPS 404 and Controller empty)
+message 'TC-EMPTY-6c: Verify VM boots from USB (Debian) - Device fallback'
+exec -t 2m bash verify-boot-os-v2.sh {{template "test_vm"}} debian
+stdout 'BOOT OS VERIFIED'
+message '=== TC-EMPTY-6 PASSED ==='
+
+# Cleanup TC-EMPTY-6
+eden pod delete {{template "test_vm"}}
+test eden.app.test -test.v -timewait 5m - {{template "test_vm"}}
+
+# Restore LPS
+exec -t 1m bash clean-lps-state.sh
+
+# ============================================================================
+# TC-EMPTY-7: Device=nousb, Controller="", LPS app not in response -> HDD boot
+# LPS returns 200 but app not in list, Controller empty, should fall back to Device
+# Expected: Ubuntu boots (LPS app missing, Controller "", Device nousb wins)
+# ============================================================================
+message '=== TC-EMPTY-7: LPS app not in response, Controller="" -> Device fallback (HDD boot) ==='
+
+# Set device property to nousb
+eden controller edge-node update --config app.boot.order=nousb
+
+# Wait for EVE to pick up the config
+message 'Waiting for EVE to apply device config...'
+exec sleep 15
+
+# Deploy test VM WITHOUT per-app boot_order (Controller="")
+message 'Deploying test VM without --boot-order (Controller="", Device=nousb)'
+eden pod deploy -n {{template "test_vm"}} --memory=1024MB --vnc-display=1 --fml -p {{template "vm_port"}}:22 --adapters $usb_adapter https://cloud-images.ubuntu.com/releases/focal/release-20210510/ubuntu-20.04-server-cloudimg-amd64.img --networks={{template "network"}}
+test eden.app.test -test.v -timewait 10m RUNNING {{template "test_vm"}}
+
+# Get test VM UUID
+exec bash get-vm-uuid.sh {{template "test_vm"}}
+source .env
+
+# Record timestamp for log filtering
+exec bash record-timestamp.sh
+
+# Set LPS to return config for a DIFFERENT app (not this VM)
+# This simulates: app exists in LPS but THIS specific VM is not configured
+message 'TC-EMPTY-7a: Setting LPS config for different app (this VM not in response)'
+exec -t 2m bash set-lps-config-for-other-app.sh
+exec -t 2m bash wait-vm-config-applied.sh
+
+# Verify appbootinfo shows Device as source (app not in LPS, Controller="")
+exec -t 3m bash verify-appbootinfo.sh $vm_uuid BOOT_ORDER_NOUSB BOOT_ORDER_SOURCE_DEVICE_PROPERTY
+
+# Restart VM to apply
+message 'Restarting VM to verify app-not-in-LPS + Controller="" uses Device'
+eden pod stop {{template "test_vm"}}
+test eden.app.test -test.v -timewait 20m HALTED {{template "test_vm"}}
+eden pod start {{template "test_vm"}}
+test eden.app.test -test.v -timewait 10m RUNNING {{template "test_vm"}}
+
+# Record timestamp for log filtering
+exec bash record-timestamp.sh
+
+# Verify fw_cfg is "nousb" (LPS app missing, Controller "", Device nousb wins)
+message 'TC-EMPTY-7b: Verify fw_cfg=nousb (LPS app missing, Controller="", Device=nousb wins)'
+exec -t 2m bash verify-hypervisor-config-v2.sh $vm_uuid nousb
+stdout 'fw_cfg USB boot: nousb'
+
+# Verify Ubuntu boots (Device property wins)
+message 'TC-EMPTY-7c: Verify VM boots from HDD (Ubuntu) - Device fallback'
+exec -t 2m bash verify-boot-os-v2.sh {{template "test_vm"}} ubuntu
+stdout 'BOOT OS VERIFIED'
+message '=== TC-EMPTY-7 PASSED ==='
+
+# Cleanup TC-EMPTY-7
+eden pod delete {{template "test_vm"}}
+test eden.app.test -test.v -timewait 5m - {{template "test_vm"}}
+
+# Clean LPS state
+exec -t 1m bash clean-lps-state.sh
+
+# ============================================================================
+# TC-EMPTY-8: Device=usb, Controller="", LPS usb_boot="" -> USB boot
+# LPS explicitly returns usb_boot="" for app, Controller also empty
+# Both LPS and Controller are "no preference", should fall back to Device
+# Expected: Debian boots (LPS "", Controller "", Device usb wins)
+# ============================================================================
+message '=== TC-EMPTY-8: LPS usb_boot="", Controller="" -> Device fallback (USB boot) ==='
+
+# Device property is still usb from previous setup (or set it again)
+eden controller edge-node update --config app.boot.order=usb
+
+# Wait for EVE to pick up the config
+message 'Waiting for EVE to apply device config...'
+exec sleep 15
+
+# Deploy test VM WITHOUT per-app boot_order (Controller="")
+message 'Deploying test VM without --boot-order (Controller="", Device=usb)'
+eden pod deploy -n {{template "test_vm"}} --memory=1024MB --vnc-display=1 --fml -p {{template "vm_port"}}:22 --adapters $usb_adapter https://cloud-images.ubuntu.com/releases/focal/release-20210510/ubuntu-20.04-server-cloudimg-amd64.img --networks={{template "network"}}
+
+# USB boot VM may become unstable - use custom polling
+exec -t 5m bash wait-for-running-once.sh {{template "test_vm"}}
+
+# Get test VM UUID
+exec bash get-vm-uuid.sh {{template "test_vm"}}
+source .env
+
+# Record timestamp for log filtering
+exec bash record-timestamp.sh
+
+# Verify baseline: Controller="" falls back to Device=usb
+message 'TC-EMPTY-8a: Baseline - Controller="" falls back to Device=usb'
+exec -t 2m bash verify-hypervisor-config-v2.sh $vm_uuid usb
+stdout 'fw_cfg USB boot: usb'
+
+# Now set LPS to explicit empty string for this app (usb_boot="")
+# This should also mean "no preference" - fall back to Controller, then Device
+message 'TC-EMPTY-8b: Setting LPS usb_boot="" explicitly'
+exec -t 2m bash set-vm-boot-order.sh $vm_uuid ""
+exec -t 2m bash wait-vm-config-applied.sh
+
+# Verify appbootinfo shows Device as source (LPS="", Controller="")
+exec -t 3m bash verify-appbootinfo.sh $vm_uuid BOOT_ORDER_USB BOOT_ORDER_SOURCE_DEVICE_PROPERTY
+
+# Restart VM to apply
+message 'Restarting VM to verify LPS="" + Controller="" uses Device'
+eden pod stop {{template "test_vm"}}
+test eden.app.test -test.v -timewait 20m HALTED {{template "test_vm"}}
+eden pod start {{template "test_vm"}}
+test eden.app.test -test.v -timewait 10m RUNNING {{template "test_vm"}}
+
+# USB boot VM may become unstable - use custom polling
+exec -t 5m bash wait-for-running-once.sh {{template "test_vm"}}
+
+# Record timestamp for log filtering
+exec bash record-timestamp.sh
+
+# Verify fw_cfg is still "usb" (LPS "", Controller "", Device usb wins)
+message 'TC-EMPTY-8c: Verify fw_cfg=usb (LPS="", Controller="", Device=usb wins)'
+exec -t 2m bash verify-hypervisor-config-v2.sh $vm_uuid usb
+stdout 'fw_cfg USB boot: usb'
+
+# Verify Debian boots (Device property wins because both LPS and Controller are empty)
+message 'TC-EMPTY-8d: Verify VM boots from USB (Debian) - Device fallback'
+exec -t 2m bash verify-boot-os-v2.sh {{template "test_vm"}} debian
+stdout 'BOOT OS VERIFIED'
+message '=== TC-EMPTY-8 PASSED ==='
+
+# Cleanup TC-EMPTY-8
+eden pod delete {{template "test_vm"}}
+test eden.app.test -test.v -timewait 5m - {{template "test_vm"}}
+
+# Clean up device property and restore LPS before regular LPS tests
+eden controller edge-node update --config app.boot.order=
+exec -t 1m bash clean-lps-state.sh
+
+message '========================================'
+message 'ALL EMPTY STRING TESTS COMPLETED (TC-EMPTY-1 to TC-EMPTY-8)'
+message '========================================'
+
 
 
 # ============================================================================
@@ -219,7 +1553,7 @@ exec -t 2m bash verify-hypervisor-config-v2.sh $vm_uuid none
 stdout 'fw_cfg USB boot: not set'
 
 # Verify Debian boots (USB boot - OVMF default without resolution)
-message 'TC2b: Verify VM boots from USB (Debian) - OVMF default without resolution'
+message 'TC2b: Verify VM boots from USB (Debian) - OVMF default USB priority'
 exec -t 2m bash verify-boot-os-v2.sh {{template "test_vm"}} debian
 stdout 'BOOT OS VERIFIED'
 message '=== TC2 PASSED ==='
@@ -254,6 +1588,9 @@ source .env
 # Set bootOrderConfig=usb via LPS
 exec -t 2m bash set-vm-boot-order.sh $vm_uuid usb
 exec -t 2m bash wait-vm-config-applied.sh
+
+# Verify appbootinfo shows LPS as source with USB boot order
+exec -t 3m bash verify-appbootinfo.sh $vm_uuid BOOT_ORDER_USB BOOT_ORDER_SOURCE_LPS
 
 # Verify EVE received the config
 message 'TC3a: Verify EVE received bootOrderConfig=usb'
@@ -299,7 +1636,7 @@ message '=== TC4: No resolution + fw_cfg=usb -> Debian (USB boot) ==='
 # Clean LPS state before test
 exec -t 1m bash clean-lps-state.sh
 
-# Remove resolution
+# Remove FML resolution
 eden controller edge-node update --config app.fml.resolution=
 
 # Wait for EVE to pick up the resolution removal
@@ -320,6 +1657,9 @@ source .env
 # Set bootOrderConfig=usb via LPS
 exec -t 2m bash set-vm-boot-order.sh $vm_uuid usb
 exec -t 2m bash wait-vm-config-applied.sh
+
+# Verify appbootinfo shows LPS as source with USB boot order
+exec -t 3m bash verify-appbootinfo.sh $vm_uuid BOOT_ORDER_USB BOOT_ORDER_SOURCE_LPS
 
 # Restart VM to apply fw_cfg (restart is appropriate here - applying a setting)
 eden pod stop {{template "test_vm"}}
@@ -343,7 +1683,7 @@ message '=== TC4 PASSED ==='
 
 # ============================================================================
 # TC5: Custom resolution + fw_cfg="nousb" -> HDD boot (Ubuntu)
-# fw_cfg="nousb" explicitly deprioritizes USB
+# fw_cfg="nousb" removes USB devices from boot order completely
 # ============================================================================
 message '=== TC5: Custom resolution + fw_cfg=nousb -> Ubuntu (HDD boot) ==='
 
@@ -372,6 +1712,9 @@ source .env
 exec -t 2m bash set-vm-boot-order.sh $vm_uuid nousb
 exec -t 2m bash wait-vm-config-applied.sh
 
+# Verify appbootinfo shows LPS as source with NOUSB boot order
+exec -t 3m bash verify-appbootinfo.sh $vm_uuid BOOT_ORDER_NOUSB BOOT_ORDER_SOURCE_LPS
+
 # Verify EVE received the config
 message 'TC5a: Verify EVE received bootOrderConfig=nousb'
 exec -t 2m bash verify-eve-received-config-v2.sh $vm_uuid nousb
@@ -383,7 +1726,7 @@ test eden.app.test -test.v -timewait 20m HALTED {{template "test_vm"}}
 eden pod start {{template "test_vm"}}
 test eden.app.test -test.v -timewait 10m RUNNING {{template "test_vm"}}
 
-# Record timestamp before checking logs
+# Record timestamp for log filtering
 exec bash record-timestamp.sh
 
 # Verify fw_cfg=nousb in hypervisor config
@@ -391,15 +1734,15 @@ message 'TC5b: Verify fw_cfg=nousb in hypervisor config'
 exec -t 2m bash verify-hypervisor-config-v2.sh $vm_uuid nousb
 stdout 'fw_cfg USB boot: nousb'
 
-# Verify Ubuntu boots (HDD boot - nousb deprioritizes USB)
-message 'TC5c: Verify VM boots from HDD (Ubuntu) - nousb deprioritizes USB'
+# Verify Ubuntu boots (HDD boot - nousb removes USB devices from boot order)
+message 'TC5c: Verify VM boots from HDD (Ubuntu) - nousb removes USB from boot order'
 exec -t 2m bash verify-boot-os-v2.sh {{template "test_vm"}} ubuntu
 stdout 'BOOT OS VERIFIED'
 message '=== TC5 PASSED ==='
 
 # ============================================================================
 # TC6: No resolution + fw_cfg="nousb" -> HDD boot (Ubuntu)
-# fw_cfg="nousb" overrides OVMF default USB preference
+# fw_cfg="nousb" removes USB from boot order, overriding OVMF default USB preference
 # ============================================================================
 message '=== TC6: No resolution + fw_cfg=nousb -> Ubuntu (HDD boot) ==='
 
@@ -428,13 +1771,16 @@ source .env
 exec -t 2m bash set-vm-boot-order.sh $vm_uuid nousb
 exec -t 2m bash wait-vm-config-applied.sh
 
+# Verify appbootinfo shows LPS as source with NOUSB boot order
+exec -t 3m bash verify-appbootinfo.sh $vm_uuid BOOT_ORDER_NOUSB BOOT_ORDER_SOURCE_LPS
+
 # Restart VM to apply fw_cfg (restart is appropriate here - applying a setting)
 eden pod stop {{template "test_vm"}}
 test eden.app.test -test.v -timewait 20m HALTED {{template "test_vm"}}
 eden pod start {{template "test_vm"}}
 test eden.app.test -test.v -timewait 10m RUNNING {{template "test_vm"}}
 
-# Record timestamp before checking logs
+# Record timestamp for log filtering
 exec bash record-timestamp.sh
 
 # Verify fw_cfg=nousb persists
@@ -442,8 +1788,8 @@ message 'TC6a: Verify fw_cfg=nousb persists'
 exec -t 2m bash verify-hypervisor-config-v2.sh $vm_uuid nousb
 stdout 'fw_cfg USB boot: nousb'
 
-# Verify Ubuntu boots (HDD boot - nousb overrides OVMF default)
-message 'TC6b: Verify VM boots from HDD (Ubuntu) - nousb overrides OVMF USB default'
+# Verify Ubuntu boots (HDD boot - nousb removes USB from boot order)
+message 'TC6b: Verify VM boots from HDD (Ubuntu) - nousb removes USB from boot order'
 exec -t 2m bash verify-boot-os-v2.sh {{template "test_vm"}} ubuntu
 stdout 'BOOT OS VERIFIED'
 message '=== TC6 PASSED ==='
@@ -478,6 +1824,10 @@ source .env
 message 'Setting VM1=usb, VM2=nousb'
 exec -t 2m bash set-multi-vm-boot-order.sh $vm1_uuid usb $vm2_uuid nousb
 exec -t 2m bash wait-vm-config-applied.sh
+
+# Verify appbootinfo shows LPS as source for both VMs
+exec -t 3m bash verify-appbootinfo.sh $vm1_uuid BOOT_ORDER_USB BOOT_ORDER_SOURCE_LPS
+exec -t 3m bash verify-appbootinfo.sh $vm2_uuid BOOT_ORDER_NOUSB BOOT_ORDER_SOURCE_LPS
 
 # Restart both VMs
 message 'Restarting both VMs'
@@ -527,7 +1877,7 @@ message '=== TC8: Config with UUID only (no displayname) ==='
 # Clean LPS state before test
 exec -t 1m bash clean-lps-state.sh
 
-# Redeploy VM fresh for this test
+# Redeploy VM fresh for UUID-only parsing test
 message 'Redeploying VM for UUID-only parsing test'
 eden pod delete {{template "test_vm"}}
 test eden.app.test -test.v -timewait 5m - {{template "test_vm"}}
@@ -542,6 +1892,9 @@ source .env
 message 'Setting bootOrderConfig using UUID only (no displayname)'
 exec -t 2m bash set-vm-boot-order-uuid-only.sh $vm_uuid usb
 exec -t 2m bash wait-vm-config-applied.sh
+
+# Verify appbootinfo shows LPS as source with USB boot order
+exec -t 3m bash verify-appbootinfo.sh $vm_uuid BOOT_ORDER_USB BOOT_ORDER_SOURCE_LPS
 
 # Verify EVE received and processed the config
 message 'TC8a: Verify EVE received UUID-only config'
@@ -578,7 +1931,7 @@ message '=== TC9: Config with displayname only (no UUID) ==='
 # Clean LPS state before test
 exec -t 1m bash clean-lps-state.sh
 
-# Redeploy VM fresh for this test
+# Redeploy VM fresh for displayname-only parsing test
 message 'Redeploying VM for displayname-only parsing test'
 eden pod delete {{template "test_vm"}}
 test eden.app.test -test.v -timewait 5m - {{template "test_vm"}}
@@ -593,6 +1946,9 @@ source .env
 message 'Setting bootOrderConfig using displayname only (no UUID)'
 exec -t 2m bash set-vm-boot-order-displayname-only.sh {{template "test_vm"}} nousb
 exec -t 2m bash wait-vm-config-applied.sh
+
+# Verify appbootinfo shows LPS as source with NOUSB boot order
+exec -t 3m bash verify-appbootinfo.sh $vm_uuid BOOT_ORDER_NOUSB BOOT_ORDER_SOURCE_LPS
 
 # Verify EVE received and processed the config
 message 'TC9a: Verify EVE received displayname-only config'
@@ -643,8 +1999,11 @@ source .env
 exec -t 2m bash set-vm-boot-order.sh $vm_uuid usb
 exec -t 2m bash wait-vm-config-applied.sh
 
+# Verify appbootinfo shows LPS as source with USB boot order
+exec -t 3m bash verify-appbootinfo.sh $vm_uuid BOOT_ORDER_USB BOOT_ORDER_SOURCE_LPS
+
 # Verify EVE received the config
-message 'TC10a: Verify initial config received'
+message 'TC10a: Verify EVE received bootOrderConfig=usb'
 exec -t 2m bash verify-eve-received-config-v2.sh $vm_uuid usb
 stdout 'EVE received boot order config'
 
@@ -665,6 +2024,9 @@ exec sleep 15
 exec -t 2m bash set-vm-boot-order.sh $vm_uuid nousb
 exec -t 2m bash wait-vm-config-applied.sh
 
+# Verify appbootinfo shows LPS as source with NOUSB boot order after address change
+exec -t 3m bash verify-appbootinfo.sh $vm_uuid BOOT_ORDER_NOUSB BOOT_ORDER_SOURCE_LPS
+
 # Verify EVE received the new config after LPS address change
 message 'TC10c: Verify config received after LPS address change'
 exec -t 2m bash verify-eve-received-config-v2.sh $vm_uuid nousb
@@ -678,12 +2040,25 @@ test eden.app.test -test.v -timewait 10m RUNNING {{template "test_vm"}}
 
 exec bash record-timestamp.sh
 
-message 'TC10d: Verify fw_cfg=nousb applied after address change'
+# Step 3: Verify config persisted - check fw_cfg is still nousb
+message 'TC10d: Verify fw_cfg=nousb persisted after EVE reboot'
 exec -t 2m bash verify-hypervisor-config-v2.sh $vm_uuid nousb
 stdout 'fw_cfg USB boot: nousb'
 
-message '=== TC10 PASSED ==='
+# Step 4: Verify VM boots from HDD (proves nousb config was restored from disk)
+# If config didn't persist, VM would boot from USB (Debian) since no resolution is set
+message 'TC10e: Verify VM boots from HDD (Ubuntu) after EVE reboot'
+exec -t 2m bash verify-boot-os-v2.sh {{template "test_vm"}} ubuntu
+stdout 'BOOT OS VERIFIED'
 
+# Cleanup
+eden pod delete {{template "test_vm"}}
+test eden.app.test -test.v -timewait 5m - {{template "test_vm"}}
+
+# Clear device property
+eden controller edge-node update --config app.boot.order=
+
+message '=== TC10 PASSED ==='
 
 # ============================================================================
 # TC11-13: HTTP Status Code Tests
@@ -708,6 +2083,9 @@ message 'TC11: Testing HTTP 200/201 (normal config response)'
 exec -t 2m bash set-vm-boot-order.sh $vm_uuid usb
 exec -t 2m bash wait-vm-config-applied.sh
 
+# Verify appbootinfo shows LPS as source with USB boot order
+exec -t 3m bash verify-appbootinfo.sh $vm_uuid BOOT_ORDER_USB BOOT_ORDER_SOURCE_LPS
+
 # Verify EVE received the config (200/201 response)
 exec -t 2m bash verify-eve-received-config-v2.sh $vm_uuid usb
 stdout 'EVE received boot order config'
@@ -726,6 +2104,9 @@ message 'TC12: Testing HTTP 204 (no content - config unchanged)'
 # Set initial config to usb, wait for EVE to fetch it
 exec -t 2m bash set-vm-boot-order.sh $vm_uuid usb
 exec -t 2m bash wait-vm-config-applied.sh
+
+# Verify appbootinfo shows LPS as source with USB boot order
+exec -t 3m bash verify-appbootinfo.sh $vm_uuid BOOT_ORDER_USB BOOT_ORDER_SOURCE_LPS
 
 # Verify EVE received the initial config
 exec -t 2m bash verify-eve-received-config-v2.sh $vm_uuid usb
@@ -785,12 +2166,12 @@ message 'TC12 PASSED: 204 and 200-with-same-content preserve boot order'
 message 'TC13: Testing HTTP 404 (not found - triggers throttle)'
 
 # Remove the config file to trigger 404 response
-exec -t 1m bash trigger-lps-404.sh
+exec -t 2m bash trigger-lps-404.sh
 
-# Wait for EVE to poll and receive 404
-exec sleep 15
+# Wait for EVE to POST and receive 404
+exec sleep 70
 
-# Verify EVE switched to throttled polling (5 minute interval)
+# Verify EVE switched to throttled polling (1 hour interval)
 exec -t 1m bash verify-polling-interval.sh throttled
 stdout 'Polling interval: throttled'
 
@@ -799,9 +2180,12 @@ message 'TC13a: Verify recovery from 404 throttle'
 exec -t 2m bash set-vm-boot-order.sh $vm_uuid nousb
 
 # Need to wait for throttle period or trigger immediate fetch
-# The TriggerAppBootConfigGET is called when LPS config changes
+# The TriggerAppBootInfoPOST is called when LPS config changes
 eden controller edge-node update --device local_profile_server=$app_ip:8888
 exec -t 2m bash wait-vm-config-applied.sh
+
+# Verify appbootinfo shows LPS as source with NOUSB boot order after recovery
+exec -t 3m bash verify-appbootinfo.sh $vm_uuid BOOT_ORDER_NOUSB BOOT_ORDER_SOURCE_LPS
 
 # Verify EVE received config and is back to normal polling
 exec -t 2m bash verify-eve-received-config-v2.sh $vm_uuid nousb
@@ -846,6 +2230,9 @@ message 'TC14: Reset by removing app from config'
 exec -t 2m bash set-vm-boot-order.sh $vm_uuid usb
 exec -t 2m bash wait-vm-config-applied.sh
 
+# Verify appbootinfo shows LPS as source with USB boot order
+exec -t 3m bash verify-appbootinfo.sh $vm_uuid BOOT_ORDER_USB BOOT_ORDER_SOURCE_LPS
+
 eden pod stop {{template "test_vm"}}
 test eden.app.test -test.v -timewait 20m HALTED {{template "test_vm"}}
 eden pod start {{template "test_vm"}}
@@ -855,10 +2242,18 @@ exec bash record-timestamp.sh
 exec -t 2m bash verify-hypervisor-config-v2.sh $vm_uuid usb
 stdout 'fw_cfg USB boot: usb'
 
+# Verify Debian boots (USB) - confirms USB boot works before we reset
+message 'TC14 Verify: VM boots from USB (Debian) before reset'
+exec -t 2m bash verify-boot-os-v2.sh {{template "test_vm"}} debian
+stdout 'BOOT OS VERIFIED'
+
 # Remove VM from config (send config with dummy app)
 message 'TC14a: Remove app from LPS config'
 exec -t 1m bash remove-vm-from-config.sh $vm_uuid
-exec -t 2m bash wait-vm-config-applied.sh
+exec -t 2m bash wait-vm-config-applied.sh reset
+
+# Verify appbootinfo shows UNSPECIFIED (no LPS override anymore)
+exec -t 3m bash verify-appbootinfo.sh $vm_uuid BOOT_ORDER_UNSPECIFIED BOOT_ORDER_SOURCE_UNSPECIFIED
 
 eden pod stop {{template "test_vm"}}
 test eden.app.test -test.v -timewait 20m HALTED {{template "test_vm"}}
@@ -884,6 +2279,9 @@ message 'TC15: Reset by setting usb_boot="" explicitly'
 exec -t 2m bash set-vm-boot-order.sh $vm_uuid usb
 exec -t 2m bash wait-vm-config-applied.sh
 
+# Verify appbootinfo shows LPS as source with USB boot order
+exec -t 3m bash verify-appbootinfo.sh $vm_uuid BOOT_ORDER_USB BOOT_ORDER_SOURCE_LPS
+
 eden pod stop {{template "test_vm"}}
 test eden.app.test -test.v -timewait 20m HALTED {{template "test_vm"}}
 eden pod start {{template "test_vm"}}
@@ -893,10 +2291,18 @@ exec bash record-timestamp.sh
 exec -t 2m bash verify-hypervisor-config-v2.sh $vm_uuid usb
 stdout 'fw_cfg USB boot: usb'
 
+# Verify Debian boots (USB) - confirms USB boot works before we reset
+message 'TC15 Verify: VM boots from USB (Debian) before reset'
+exec -t 2m bash verify-boot-os-v2.sh {{template "test_vm"}} debian
+stdout 'BOOT OS VERIFIED'
+
 # Set usb_boot="" explicitly
 message 'TC15a: Set usb_boot="" explicitly'
 exec -t 2m bash set-vm-boot-order-explicit-empty.sh $vm_uuid
-exec -t 2m bash wait-vm-config-applied.sh
+exec -t 2m bash wait-vm-config-applied.sh 200
+
+# Verify appbootinfo shows UNSPECIFIED (explicit empty = no LPS override)
+exec -t 3m bash verify-appbootinfo.sh $vm_uuid BOOT_ORDER_UNSPECIFIED BOOT_ORDER_SOURCE_UNSPECIFIED
 
 eden pod stop {{template "test_vm"}}
 test eden.app.test -test.v -timewait 20m HALTED {{template "test_vm"}}
@@ -922,19 +2328,33 @@ message 'TC16: Reset ALL apps by sending empty config'
 exec -t 2m bash set-vm-boot-order.sh $vm_uuid usb
 exec -t 2m bash wait-vm-config-applied.sh
 
+# Verify appbootinfo shows LPS as source with USB boot order
+exec -t 3m bash verify-appbootinfo.sh $vm_uuid BOOT_ORDER_USB BOOT_ORDER_SOURCE_LPS
+
 eden pod stop {{template "test_vm"}}
 test eden.app.test -test.v -timewait 20m HALTED {{template "test_vm"}}
 eden pod start {{template "test_vm"}}
 exec -t 5m bash wait-for-running-once.sh {{template "test_vm"}}
 
 exec bash record-timestamp.sh
+
+# Verify USB boot is in effect before sending empty config
+message 'TC16a: Verify fw_cfg=usb before reset'
 exec -t 2m bash verify-hypervisor-config-v2.sh $vm_uuid usb
 stdout 'fw_cfg USB boot: usb'
 
+# Verify Debian boots (USB) - confirms USB boot works before we reset
+message 'TC16b: Verify VM boots from USB (Debian) before reset'
+exec -t 2m bash verify-boot-os-v2.sh {{template "test_vm"}} debian
+stdout 'BOOT OS VERIFIED'
+
 # Send empty config to reset ALL apps
-message 'TC16a: Send empty config {"app_configs":[]}'
+message 'TC16c: Send empty config {"app_configs":[]}'
 exec -t 1m bash set-empty-config.sh
-exec -t 2m bash wait-vm-config-applied.sh
+exec -t 2m bash wait-vm-config-applied.sh 200-empty
+
+# Verify appbootinfo shows UNSPECIFIED (empty config clears all LPS overrides)
+exec -t 3m bash verify-appbootinfo.sh $vm_uuid BOOT_ORDER_UNSPECIFIED BOOT_ORDER_SOURCE_UNSPECIFIED
 
 eden pod stop {{template "test_vm"}}
 test eden.app.test -test.v -timewait 20m HALTED {{template "test_vm"}}
@@ -943,17 +2363,24 @@ test eden.app.test -test.v -timewait 10m RUNNING {{template "test_vm"}}
 
 exec bash record-timestamp.sh
 
-message 'TC16b: Verify fw_cfg cleared after empty config'
+message 'TC16d: Verify fw_cfg cleared after empty config'
 exec -t 2m bash verify-hypervisor-config-v2.sh $vm_uuid none
 stdout 'fw_cfg USB boot: not set'
 
-message 'TC16c: Verify VM boots from HDD (Ubuntu) - reset to default'
+message 'TC16e: Verify VM boots from HDD (Ubuntu) - reset to default'
 exec -t 2m bash verify-boot-os-v2.sh {{template "test_vm"}} ubuntu
 stdout 'BOOT OS VERIFIED'
 
 message 'TC16 PASSED: Empty config resets ALL apps to default'
 
 message '=== TC14-16 PASSED ==='
+
+# ############################################################################
+# PHASE 3: EVE REBOOT PERSISTENCE TESTS (Most Complex)
+# These tests verify that boot order configuration survives EVE reboots.
+# Prerequisites: LPS deployed and running, test VM available
+# These are the most complex tests as they involve full EVE reboot cycles.
+# ############################################################################
 
 # ============================================================================
 # TC17: Persistence - Verify boot config persists across EVE reboot
@@ -982,29 +2409,31 @@ test eden.app.test -test.v -timewait 5m - {{template "test_vm"}}
 eden pod delete {{template "test_vm_2"}}
 test eden.app.test -test.v -timewait 5m - {{template "test_vm_2"}}
 
-# Deploy fresh VM for reboot test
-eden pod deploy -n {{template "test_vm"}} --memory=1024MB --vnc-display=1 --fml -p {{template "vm_port"}}:22 --adapters $usb_adapter https://cloud-images.ubuntu.com/releases/focal/release-20210510/ubuntu-20.04-server-cloudimg-amd64.img --networks={{template "network"}}
+# Deploy fresh VM for reboot test WITH Controller boot_order=usb
+# This allows testing LPS override (nousb) AND fallback to Controller (usb) after LPS clear
+eden pod deploy -n {{template "test_vm"}} --memory=1024MB --vnc-display=1 --fml --boot-order=usb -p {{template "vm_port"}}:22 --adapters $usb_adapter https://cloud-images.ubuntu.com/releases/focal/release-20210510/ubuntu-20.04-server-cloudimg-amd64.img --networks={{template "network"}}
 test eden.app.test -test.v -timewait 10m RUNNING {{template "test_vm"}}
 
 exec bash get-vm-uuid.sh {{template "test_vm"}}
 source .env
 
-# First verify VM boots from USB (Debian) by default (no resolution, no fw_cfg)
-# This confirms that without nousb, USB boot is the default
+# First verify VM boots from USB (Debian) due to Controller=usb (no LPS override yet)
 exec bash record-timestamp.sh
-message 'TC17a: Verify VM boots from USB (Debian) by default (no resolution set)'
+message 'TC17a: Verify VM boots from USB (Debian) - Controller=usb'
 exec -t 2m bash verify-boot-os-v2.sh {{template "test_vm"}} debian
 stdout 'BOOT OS VERIFIED'
 
-# Step 1: Set boot order to nousb via LPS
-# Without this, VM would boot from USB (Debian) since no resolution is set
-message 'TC17b: Set boot order to nousb (without resolution, USB would be default)'
+# Step 1: Set boot order to nousb via LPS (overrides Controller=usb)
+message 'TC17b: Set LPS boot order to nousb (overrides Controller=usb)'
 exec -t 2m bash set-vm-boot-order.sh $vm_uuid nousb
 exec -t 2m bash wait-vm-config-applied.sh
 
 # Verify config is applied
 exec -t 2m bash verify-eve-received-config-v2.sh $vm_uuid nousb
 stdout 'EVE received boot order config'
+
+# Verify appbootinfo shows LPS as source with NOUSB boot order
+exec -t 3m bash verify-appbootinfo.sh $vm_uuid BOOT_ORDER_NOUSB BOOT_ORDER_SOURCE_LPS
 
 # Restart VM to apply nousb setting
 eden pod stop {{template "test_vm"}}
@@ -1040,13 +2469,87 @@ message 'TC17g: Verify fw_cfg=nousb persisted after EVE reboot'
 exec -t 2m bash verify-hypervisor-config-v2.sh $vm_uuid nousb
 stdout 'fw_cfg USB boot: nousb'
 
+# Verify appbootinfo still shows LPS as source (persisted across reboot)
+exec -t 3m bash verify-appbootinfo.sh $vm_uuid BOOT_ORDER_NOUSB BOOT_ORDER_SOURCE_LPS
+
 # Step 4: Verify VM boots from HDD (proves nousb config was restored from disk)
 # If config didn't persist, VM would boot from USB (Debian) since no resolution is set
 message 'TC17h: Verify VM boots from HDD (Ubuntu) after EVE reboot'
 exec -t 2m bash verify-boot-os-v2.sh {{template "test_vm"}} ubuntu
 stdout 'BOOT OS VERIFIED'
 
-message '=== TC17 PASSED ==='
+# Before Step 5, we need to restart local-manager process.
+# After EVE reboot, the container restarts but local_manager process doesn't auto-start.
+# We do this AFTER persistence verification (Steps 3-4) to ensure those tests
+# verify config loaded from disk, not fetched from LPS.
+message 'TC17h2: Restarting local-manager process for LPS communication'
+test eden.app.test -test.v -timewait 5m RUNNING local-manager
+exec -t 1m bash local-manager-start.sh
+
+# Step 5: Clear LPS and verify fallback to Controller after reboot
+message 'TC17-i: Clearing LPS config to test Controller fallback'
+exec -t 1m bash clean-lps-state.sh
+exec -t 2m bash wait-vm-config-applied.sh
+
+# Verify appbootinfo shows Controller as source (LPS cleared)
+exec -t 3m bash verify-appbootinfo.sh $vm_uuid BOOT_ORDER_USB BOOT_ORDER_SOURCE_CONTROLLER
+
+# Restart VM to apply LPS removal
+message 'TC17-j: Restarting VM after LPS cleared'
+eden pod stop {{template "test_vm"}}
+test eden.app.test -test.v -timewait 20m HALTED {{template "test_vm"}}
+eden pod start {{template "test_vm"}}
+test eden.app.test -test.v -timewait 10m RUNNING {{template "test_vm"}}
+
+# USB boot VM may become unstable - use custom polling
+exec -t 5m bash wait-for-running-once.sh {{template "test_vm"}}
+
+# Record timestamp for log filtering
+exec bash record-timestamp.sh
+
+# Verify Controller=usb is now used (LPS cleared)
+message 'TC17-k: Verify fw_cfg=usb (LPS cleared, Controller wins)'
+exec -t 2m bash verify-hypervisor-config-v2.sh $vm_uuid usb
+stdout 'fw_cfg USB boot: usb'
+
+# Verify Debian boots (Controller wins after LPS clear)
+message 'TC17-l: Verify VM boots from USB (Debian) - Controller wins after LPS cleared'
+exec -t 2m bash verify-boot-os-v2.sh {{template "test_vm"}} debian
+stdout 'BOOT OS VERIFIED'
+
+# Step 6: Final EVE reboot to verify Controller persistence without LPS
+message 'TC17-m: Triggering final EVE reboot to verify Controller persistence...'
+eden controller edge-node reboot
+
+# Wait for VM to leave RUNNING state (confirming EVE reboot has started)
+message 'TC17-n: Waiting for VM to leave RUNNING state (EVE reboot starting)...'
+exec -t 10m bash wait-for-not-running.sh {{template "test_vm"}}
+
+# Wait for VM to be running after EVE reboot
+message 'TC17-o: Waiting for VM to be running after EVE reboot...'
+exec -t 10m bash wait-for-running-once.sh {{template "test_vm"}}
+
+# Record timestamp for log filtering
+exec bash record-timestamp.sh
+
+# Verify Controller=usb still wins over Device=nousb after reboot
+message 'TC17-p: Verify fw_cfg=usb persisted (Controller > Device after reboot)'
+exec -t 2m bash verify-hypervisor-config-v2.sh $vm_uuid usb
+stdout 'fw_cfg USB boot: usb'
+
+# Verify Debian boots (Controller persisted)
+message 'TC17-q: Verify VM boots from USB (Debian) - Controller persisted after reboot'
+exec -t 2m bash verify-boot-os-v2.sh {{template "test_vm"}} debian
+stdout 'BOOT OS VERIFIED'
+
+# Cleanup
+eden pod delete {{template "test_vm"}}
+test eden.app.test -test.v -timewait 5m - {{template "test_vm"}}
+
+# Clear device property
+eden controller edge-node update --config app.boot.order=
+
+message '=== TC17-HIER PASSED ==='
 
 # ============================================================================
 # TC18: Warning when setting boot order on running VM
@@ -1103,6 +2606,9 @@ exec bash record-timestamp.sh
 message 'TC18a: Set boot order on running VM (should produce warning in EVE logs)'
 exec -t 2m bash set-vm-boot-order.sh $vm_uuid usb
 exec -t 2m bash wait-vm-config-applied.sh
+
+# Verify appbootinfo shows LPS as source with USB boot order
+exec -t 3m bash verify-appbootinfo.sh $vm_uuid BOOT_ORDER_USB BOOT_ORDER_SOURCE_LPS
 
 # Verify warning appears in EVE logs
 message 'TC18b: Verify warning message in EVE logs'
@@ -1171,40 +2677,93 @@ done
 # Wait for a pod to reach RUNNING state at least once
 # This is useful for VMs that boot briefly and then crash (e.g., USB boot test)
 # $1 = pod name
-# Polls every 2 seconds for up to 60 attempts (2 minutes)
+#
+# Smart timeout: The script has a base timeout of 60 attempts (10 minutes) without
+# state change. But if the state changes (progress is being made), the timeout
+# counter resets. This handles cases where the VM goes through multiple states
+# (e.g., HALTING -> HALTED -> INITIAL -> BOOTING -> RUNNING) which may take
+# longer than 10 minutes total, but each transition happens within 2 minutes.
+#
 EDEN={{EdenConfig "eden.root"}}/{{EdenConfig "eden.bin-dist"}}/{{EdenConfig "eden.eden-bin"}}
 POD_NAME=$1
 
 echo "=== Waiting for pod '$POD_NAME' to reach RUNNING state ==="
-echo "Polling every 2 seconds..."
+echo "Polling every 2 seconds with smart timeout (resets on state change)..."
 
-for i in $(seq 120); do
+LAST_STATE=""
+ATTEMPTS_SINCE_CHANGE=0
+MAX_ATTEMPTS_WITHOUT_CHANGE=300 # 10 minutes without state change = timeout
+
+while true; do
     # Get current state from eden pod ps
     # Use exact match with whitespace after pod name to avoid matching similar names
-    # (e.g., test-usb-boot-vm should not match test-usb-boot-vm-2)
     STATE=$($EDEN pod ps 2>/dev/null | grep -E "^${POD_NAME}[[:space:]]" | awk '{print $NF}')
 
-    echo "Attempt $i/120: Pod '$POD_NAME' state: ${STATE:-not found}"
+    # Check if state changed
+    if [ "$STATE" != "$LAST_STATE" ]; then
+        if [ -n "$LAST_STATE" ]; then
+            echo "State changed: $LAST_STATE -> ${STATE:-not found} (resetting timeout)"
+        fi
+        LAST_STATE="$STATE"
+        ATTEMPTS_SINCE_CHANGE=0
+    else
+        ATTEMPTS_SINCE_CHANGE=$((ATTEMPTS_SINCE_CHANGE + 1))
+    fi
+
+    echo "Attempt: Pod '$POD_NAME' state: ${STATE:-not found} (unchanged for $ATTEMPTS_SINCE_CHANGE attempts)"
 
     if [ "$STATE" = "RUNNING" ]; then
         echo "SUCCESS: Pod '$POD_NAME' reached RUNNING state!"
-        echo "Pod was RUNNING at attempt $i"
         exit 0
     fi
 
     # Also check if it was RUNNING but already moved to another state
     # by looking at the LAST_STATE column (second to last)
-    LAST_STATE=$($EDEN pod ps 2>/dev/null | grep -E "^${POD_NAME}[[:space:]]" | awk '{print $(NF-1)}')
-    if [ "$LAST_STATE" = "RUNNING" ]; then
+    PREV_STATE=$($EDEN pod ps 2>/dev/null | grep -E "^${POD_NAME}[[:space:]]" | awk '{print $(NF-1)}')
+    if [ "$PREV_STATE" = "RUNNING" ]; then
         echo "SUCCESS: Pod '$POD_NAME' was RUNNING (now: $STATE)"
+        exit 0
+    fi
+
+    # Timeout if no state change for too long
+    if [ "$ATTEMPTS_SINCE_CHANGE" -ge "$MAX_ATTEMPTS_WITHOUT_CHANGE" ]; then
+        echo "ERROR: Pod '$POD_NAME' stuck in state '$STATE' for $MAX_ATTEMPTS_WITHOUT_CHANGE attempts (10 minutes)"
+        echo "Final state: $STATE"
+        exit 1
+    fi
+
+    sleep 2
+done
+
+-- wait-for-not-running.sh --
+# Wait for a pod to leave RUNNING state (i.e., confirm that EVE reboot has started affecting VMs)
+# This is useful when we trigger an EVE reboot and need to confirm the VM stopped
+# before waiting for it to come back up again.
+# $1 = pod name
+# Polls every 2 seconds for up to 120 attempts (4 minutes)
+EDEN={{EdenConfig "eden.root"}}/{{EdenConfig "eden.bin-dist"}}/{{EdenConfig "eden.eden-bin"}}
+POD_NAME=$1
+
+echo "=== Waiting for pod '$POD_NAME' to leave RUNNING state ==="
+echo "Polling every 2 seconds..."
+
+for i in $(seq 120); do
+    # Get current state from eden pod ps
+    STATE=$($EDEN pod ps 2>/dev/null | grep -E "^${POD_NAME}[[:space:]]" | awk '{print $NF}')
+
+    echo "Attempt $i/120: Pod '$POD_NAME' state: ${STATE:-not found}"
+
+    # Success if state is anything other than RUNNING (including not found/empty)
+    if [ "$STATE" != "RUNNING" ]; then
+        echo "SUCCESS: Pod '$POD_NAME' left RUNNING state (now: ${STATE:-not found})"
         exit 0
     fi
 
     sleep 2
 done
 
-echo "ERROR: Pod '$POD_NAME' never reached RUNNING state after 60 attempts"
-echo "Final state: $STATE"
+echo "ERROR: Pod '$POD_NAME' still RUNNING after 120 attempts"
+echo "EVE reboot may not have started or VM is not responding to reboot"
 exit 1
 
 -- local-manager-start.sh --
@@ -1216,14 +2775,16 @@ $EDEN sdn fwd eth0 {{template "port"}} -- {{template "ssh"}} "/root/local_manage
 -- clean-lps-state.sh --
 # Clean LPS state to return default (empty) state for all apps
 # This ensures each test starts with a clean slate
+# NOTE: local_manager should already be running - we restart it explicitly after EVE reboot
 EDEN={{EdenConfig "eden.root"}}/{{EdenConfig "eden.bin-dist"}}/{{EdenConfig "eden.eden-bin"}}
 USB_FILE="{{template "appbootconfig_file"}}"
 
 echo "=== Cleaning LPS state ==="
-echo "Resetting USB boot priority config to default (empty apps)"
+echo "Resetting USB boot priority config to default (empty app_configs)"
 
-# Write empty apps config - this is the default state
-$EDEN sdn fwd eth0 {{template "port"}} -- {{template "ssh"}} "echo '{\"apps\":[]}' > $USB_FILE"
+# Write empty app_configs - this is the default state
+# Note: The proto field is "app_configs", not "apps"
+$EDEN sdn fwd eth0 {{template "port"}} -- {{template "ssh"}} "echo '{\"app_configs\":[]}' > $USB_FILE"
 
 # Verify the file was written
 CONTENT=$($EDEN sdn fwd eth0 {{template "port"}} -- {{template "ssh"}} "cat $USB_FILE" 2>&1)
@@ -1240,7 +2801,7 @@ EDEN={{EdenConfig "eden.root"}}/{{EdenConfig "eden.bin-dist"}}/{{EdenConfig "ede
 USB_FILE="{{template "appbootconfig_file"}}"
 
 echo "=== Verifying app boot config endpoint ==="
-echo "DEBUG: Expected endpoint path: /api/v1/app-boot-config"
+echo "DEBUG: Expected endpoint path: /api/v1/appbootinfo"
 
 # Create a test config file with empty apps using simple echo
 echo "=== Testing app boot config file access ==="
@@ -1267,8 +2828,40 @@ if echo "$PROC_CHECK" | grep -q "PROC_MISSING"; then
 fi
 
 echo "DEBUG: local_manager process is running"
+
+# Check that port 8888 is listening
+echo "=== Checking if HTTP server is listening on port 8888 ==="
+PORT_CHECK=$($EDEN sdn fwd eth0 {{template "port"}} -- {{template "ssh"}} "netstat -tlnp 2>/dev/null | grep ':8888' || ss -tlnp 2>/dev/null | grep ':8888' || echo PORT_NOT_LISTENING" 2>&1)
+echo "DEBUG: Port check result: $PORT_CHECK"
+
+if echo "$PORT_CHECK" | grep -q "PORT_NOT_LISTENING"; then
+    echo "WARNING: Port 8888 not listening, waiting 5s and retrying..."
+    sleep 5
+    PORT_CHECK=$($EDEN sdn fwd eth0 {{template "port"}} -- {{template "ssh"}} "netstat -tlnp 2>/dev/null | grep ':8888' || ss -tlnp 2>/dev/null | grep ':8888' || echo PORT_NOT_LISTENING" 2>&1)
+    echo "DEBUG: Port check retry result: $PORT_CHECK"
+    if echo "$PORT_CHECK" | grep -q "PORT_NOT_LISTENING"; then
+        echo "ENDPOINT_ERROR: HTTP server not listening on port 8888"
+        # Show what processes are running for debugging
+        $EDEN sdn fwd eth0 {{template "port"}} -- {{template "ssh"}} "ps aux | grep local_manager"
+        exit 1
+    fi
+fi
+
+echo "DEBUG: HTTP server is listening on port 8888"
+
+# Try to curl the endpoint from inside the container
+echo "=== Testing HTTP endpoint from inside container ==="
+HTTP_CHECK=$($EDEN sdn fwd eth0 {{template "port"}} -- {{template "ssh"}} "curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8888/api/v1/appbootinfo 2>/dev/null || echo CURL_FAILED" 2>&1)
+echo "DEBUG: HTTP check result: $HTTP_CHECK"
+
+if echo "$HTTP_CHECK" | grep -q "CURL_FAILED"; then
+    echo "WARNING: curl check failed (may not have curl installed)"
+elif [ "$HTTP_CHECK" != "200" ] && [ "$HTTP_CHECK" != "404" ]; then
+    echo "WARNING: Unexpected HTTP response: $HTTP_CHECK"
+fi
+
 echo ""
-echo "LPS endpoint verified: /api/v1/app-boot-config is accessible and functional"
+echo "LPS endpoint verified: /api/v1/appbootinfo is accessible and functional"
 echo "LPS endpoint verified successfully"
 
 -- get-app-ip.sh --
@@ -1374,25 +2967,38 @@ echo "USB_ADAPTER=$USB_ADAPTER"
 -- set-vm-boot-order.sh --
 # Set bootOrderConfig for a VM via LPS
 # $1 = VM UUID
-# $2 = boot order: "usb", "nousb", or "" (empty for default)
+# $2 = boot order: "usb", "nousb", "unspecified", or "" (empty for explicit no-override)
+# Note: Empty string "" and "unspecified" both map to BOOT_ORDER_UNSPECIFIED
+# NOTE: local_manager should already be running - we restart it explicitly after EVE reboot
 EDEN={{EdenConfig "eden.root"}}/{{EdenConfig "eden.bin-dist"}}/{{EdenConfig "eden.eden-bin"}}
 VM_UUID=$1
-BOOT_ORDER=$2
+BOOT_ORDER_INPUT=$2
 USB_FILE="{{template "appbootconfig_file"}}"
 
-echo "=== Setting bootOrderConfig for VM $VM_UUID to '$BOOT_ORDER' ==="
+# Convert input values to enum names for protojson
+case "$BOOT_ORDER_INPUT" in
+    "usb")
+        BOOT_ORDER="BOOT_ORDER_USB"
+        ;;
+    "nousb")
+        BOOT_ORDER="BOOT_ORDER_NOUSB"
+        ;;
+    "unspecified"|"")
+        BOOT_ORDER="BOOT_ORDER_UNSPECIFIED"
+        ;;
+    *)
+        echo "WARNING: Unknown boot order '$BOOT_ORDER_INPUT', using BOOT_ORDER_UNSPECIFIED"
+        BOOT_ORDER="BOOT_ORDER_UNSPECIFIED"
+        ;;
+esac
+
+echo "=== Setting bootOrderConfig for VM $VM_UUID to '$BOOT_ORDER' (input: '$BOOT_ORDER_INPUT') ==="
 
 # Show current config
 $EDEN sdn fwd eth0 {{template "port"}} -- {{template "ssh"}} "echo '=== Current config ==='; cat $USB_FILE 2>/dev/null || echo 'No file yet'"
 
-# Write the JSON config with usb_boot
-# The new format uses usb_boot field in app_configs array
-if [ -z "$BOOT_ORDER" ]; then
-    # Empty boot order - don't include the field
-    JSON="{\"app_configs\":[{\"id\":\"$VM_UUID\",\"displayname\":\"test-usb-boot-vm\"}]}"
-else
-    JSON="{\"app_configs\":[{\"id\":\"$VM_UUID\",\"displayname\":\"test-usb-boot-vm\",\"usb_boot\":\"$BOOT_ORDER\"}]}"
-fi
+# Write the JSON config with usb_boot enum value
+JSON="{\"app_configs\":[{\"id\":\"$VM_UUID\",\"displayname\":\"test-usb-boot-vm\",\"usb_boot\":\"$BOOT_ORDER\"}]}"
 
 $EDEN sdn fwd eth0 {{template "port"}} -- {{template "ssh"}} "echo '$JSON' > $USB_FILE && touch $USB_FILE"
 
@@ -1406,16 +3012,30 @@ echo "VM config updated for $VM_UUID with bootOrderConfig='$BOOT_ORDER'"
 # Set bootOrderConfig for multiple VMs
 # $1 = VM1 UUID, $2 = VM1 boot order
 # $3 = VM2 UUID, $4 = VM2 boot order
+# NOTE: local_manager should already be running - we restart it explicitly after EVE reboot
 EDEN={{EdenConfig "eden.root"}}/{{EdenConfig "eden.bin-dist"}}/{{EdenConfig "eden.eden-bin"}}
 VM1_UUID=$1
-VM1_ORDER=$2
+VM1_ORDER_INPUT=$2
 VM2_UUID=$3
-VM2_ORDER=$4
+VM2_ORDER_INPUT=$4
 USB_FILE="{{template "appbootconfig_file"}}"
+
+# Convert input values to enum names for protojson
+case "$VM1_ORDER_INPUT" in
+    "usb") VM1_ORDER="BOOT_ORDER_USB" ;;
+    "nousb") VM1_ORDER="BOOT_ORDER_NOUSB" ;;
+    *) VM1_ORDER="BOOT_ORDER_UNSPECIFIED" ;;
+esac
+case "$VM2_ORDER_INPUT" in
+    "usb") VM2_ORDER="BOOT_ORDER_USB" ;;
+    "nousb") VM2_ORDER="BOOT_ORDER_NOUSB" ;;
+    *) VM2_ORDER="BOOT_ORDER_UNSPECIFIED" ;;
+esac
 
 echo "=== Setting bootOrderConfig for VM1=$VM1_UUID ($VM1_ORDER) and VM2=$VM2_UUID ($VM2_ORDER) ==="
 
-# Build JSON with usb_boot for both VMs
+
+# Build JSON with usb_boot enum values for both VMs
 JSON="{\"app_configs\":["
 JSON="$JSON{\"id\":\"$VM1_UUID\",\"displayname\":\"test-usb-boot-vm\",\"usb_boot\":\"$VM1_ORDER\"},"
 JSON="$JSON{\"id\":\"$VM2_UUID\",\"displayname\":\"test-usb-boot-vm-2\",\"usb_boot\":\"$VM2_ORDER\"}"
@@ -1426,6 +3046,7 @@ $EDEN sdn fwd eth0 {{template "port"}} -- {{template "ssh"}} "echo '$JSON' > $US
 # Verify the write
 echo "=== Config file content ==="
 $EDEN sdn fwd eth0 {{template "port"}} -- {{template "ssh"}} "cat $USB_FILE"
+
 echo ""
 echo "Boot order updated: VM1=$VM1_ORDER, VM2=$VM2_ORDER"
 
@@ -1434,24 +3055,28 @@ echo "Boot order updated: VM1=$VM1_ORDER, VM2=$VM2_ORDER"
 # This tests EVE's ability to match VM by UUID alone
 # $1 = VM UUID
 # $2 = boot order: "usb", "nousb", or "" (empty for default)
+# NOTE: local_manager should already be running - we restart it explicitly after EVE reboot
 EDEN={{EdenConfig "eden.root"}}/{{EdenConfig "eden.bin-dist"}}/{{EdenConfig "eden.eden-bin"}}
 VM_UUID=$1
-BOOT_ORDER=$2
+BOOT_ORDER_INPUT=$2
 USB_FILE="{{template "appbootconfig_file"}}"
+
+# Convert input values to enum names for protojson
+case "$BOOT_ORDER_INPUT" in
+    "usb") BOOT_ORDER="BOOT_ORDER_USB" ;;
+    "nousb") BOOT_ORDER="BOOT_ORDER_NOUSB" ;;
+    *) BOOT_ORDER="BOOT_ORDER_UNSPECIFIED" ;;
+esac
 
 echo "=== Setting bootOrderConfig using UUID ONLY (no displayname) ==="
 echo "VM UUID: $VM_UUID"
-echo "Boot Order: $BOOT_ORDER"
+echo "Boot Order: $BOOT_ORDER (input: '$BOOT_ORDER_INPUT')"
 
 # Show current config
 $EDEN sdn fwd eth0 {{template "port"}} -- {{template "ssh"}} "echo '=== Current config ==='; cat $USB_FILE 2>/dev/null || echo 'No file yet'"
 
 # Write JSON config with ONLY id (UUID), NO displayname field
-if [ -z "$BOOT_ORDER" ]; then
-    JSON="{\"app_configs\":[{\"id\":\"$VM_UUID\"}]}"
-else
-    JSON="{\"app_configs\":[{\"id\":\"$VM_UUID\",\"usb_boot\":\"$BOOT_ORDER\"}]}"
-fi
+JSON="{\"app_configs\":[{\"id\":\"$VM_UUID\",\"usb_boot\":\"$BOOT_ORDER\"}]}"
 
 echo "=== JSON being sent (UUID only, no displayname) ==="
 echo "$JSON"
@@ -1461,6 +3086,7 @@ $EDEN sdn fwd eth0 {{template "port"}} -- {{template "ssh"}} "echo '$JSON' > $US
 # Verify the write
 echo "=== New config ==="
 $EDEN sdn fwd eth0 {{template "port"}} -- {{template "ssh"}} "cat $USB_FILE"
+
 echo ""
 echo "VM config updated with UUID-only format"
 
@@ -1471,22 +3097,25 @@ echo "VM config updated with UUID-only format"
 # $2 = boot order: "usb", "nousb", or "" (empty for default)
 EDEN={{EdenConfig "eden.root"}}/{{EdenConfig "eden.bin-dist"}}/{{EdenConfig "eden.eden-bin"}}
 VM_NAME=$1
-BOOT_ORDER=$2
+BOOT_ORDER_INPUT=$2
 USB_FILE="{{template "appbootconfig_file"}}"
+
+# Convert input values to enum names for protojson
+case "$BOOT_ORDER_INPUT" in
+    "usb") BOOT_ORDER="BOOT_ORDER_USB" ;;
+    "nousb") BOOT_ORDER="BOOT_ORDER_NOUSB" ;;
+    *) BOOT_ORDER="BOOT_ORDER_UNSPECIFIED" ;;
+esac
 
 echo "=== Setting bootOrderConfig using displayname ONLY (no UUID) ==="
 echo "VM displayname: $VM_NAME"
-echo "Boot Order: $BOOT_ORDER"
+echo "Boot Order: $BOOT_ORDER (input: '$BOOT_ORDER_INPUT')"
 
 # Show current config
 $EDEN sdn fwd eth0 {{template "port"}} -- {{template "ssh"}} "echo '=== Current config ==='; cat $USB_FILE 2>/dev/null || echo 'No file yet'"
 
 # Write JSON config with ONLY displayname, NO id (UUID) field
-if [ -z "$BOOT_ORDER" ]; then
-    JSON="{\"app_configs\":[{\"displayname\":\"$VM_NAME\"}]}"
-else
-    JSON="{\"app_configs\":[{\"displayname\":\"$VM_NAME\",\"usb_boot\":\"$BOOT_ORDER\"}]}"
-fi
+JSON="{\"app_configs\":[{\"displayname\":\"$VM_NAME\",\"usb_boot\":\"$BOOT_ORDER\"}]}"
 
 echo "=== JSON being sent (displayname only, no UUID) ==="
 echo "$JSON"
@@ -1501,18 +3130,39 @@ echo "VM config updated with displayname-only format"
 
 -- wait-vm-config-applied.sh --
 EDEN={{EdenConfig "eden.root"}}/{{EdenConfig "eden.bin-dist"}}/{{EdenConfig "eden.eden-bin"}}
-# EVE polls LPS every 10 seconds, so wait at least 20 seconds for config to be picked up
-# Then wait an additional 10 seconds for the config to be processed and published internally
-echo "Waiting for EVE to poll LPS and apply config..."
-sleep 20
+# EVE POSTs to LPS every 1 minute, so wait at least 70 seconds for config to be picked up
+# Then wait an additional time for the config to be processed and published internally
+echo "Waiting for EVE to POST to LPS and receive config..."
+sleep 70
 echo "Config should now be applied. Verifying with logs..."
-# Quick verification that EVE is communicating with LPS - use new log patterns
-SSH_RESULT=$($EDEN eve ssh "logread | grep -iE 'AppBootConfig|BootOrder|app-boot-config|app boot config' | tail -5" 2>&1)
+
+# Get timestamp filter if available (set by record-timestamp.sh)
+START_TS=""
+if [ -f .env ]; then
+    START_TS=$(grep "^log_start_readable=" .env | cut -d"'" -f2 | head -1)
+fi
+
+# Quick verification that EVE is communicating with LPS - look for config processing logs
+# Filter by timestamp if available, otherwise get recent logs
+if [ -n "$START_TS" ]; then
+    echo "Filtering logs since: $START_TS UTC"
+    # Look for app boot config processing logs (from localcommand/appbootinfo.go)
+    # These indicate that EVE received and processed the config:
+    # - "Received app boot config for N apps" (non-empty config)
+    # - "Received empty app boot config - resetting all apps" (empty config)
+    # - "Resetting BootOrder for app no longer in LPS config" (app removed)
+    # - "Applying AppBootConfig" (config being applied)
+    SSH_RESULT=$($EDEN eve ssh "logread | grep -E '${START_TS:0:16}|Received.*app boot config|Resetting BootOrder|Applying AppBootConfig|LPS returned 404' | grep -v '^$' | tail -10" 2>&1)
+else
+    echo "No timestamp filter - showing recent logs"
+    SSH_RESULT=$($EDEN eve ssh "logread | grep -iE 'Received.*app boot config|Resetting BootOrder|Applying AppBootConfig|LPS returned 404' | tail -5" 2>&1)
+fi
+
 SSH_EXIT=$?
 if [ $SSH_EXIT -ne 0 ] && [ $SSH_EXIT -ne 1 ]; then
     echo "Note: Log check failed (SSH exit code: $SSH_EXIT)"
 elif [ -z "$SSH_RESULT" ]; then
-    echo "Note: No boot order config logs found yet (may still be processing)"
+    echo "Note: No boot order config processing logs found yet (may still be processing)"
 else
     echo "Found boot order config log entries:"
     echo "$SSH_RESULT"
@@ -1699,7 +3349,7 @@ echo "=== Looking for OVMF debug log files ==="
 if [ -n "$VM_UUID" ]; then
     # Look for VM-specific debug log using domain naming convention
     # Domain directory format: /run/hypervisor/kvm/<UUID>.<gen>.<boot>/
-    VM_DEBUG_DIR=$($EDEN eve ssh "ls -d /run/hypervisor/kvm/${VM_UUID}.* 2>/dev/null | head -1" 2>&1 | grep -v "Warning:")
+    VM_DEBUG_DIR=$($EDEN eve ssh "ls -d /run/hypervisor/kvm/${VM_UUID}.* 2>/dev/null | head -1" 2>/dev/null | grep -v "Warning:")
     if [ -n "$VM_DEBUG_DIR" ]; then
         echo "Found VM-specific directory: $VM_DEBUG_DIR"
         DEBUG_FILE="${VM_DEBUG_DIR}/ovmf-debug.log"
@@ -1769,6 +3419,10 @@ echo "=== OVMF debug check complete ==="
 # Verify EVE-BOOT messages in VM console output
 # $1 = VM name
 # $2 = expected boot order: "usb" or "nousb"
+#
+# For "usb": Expects messages like "USB boot priority ENABLED" and "Moving Boot"
+# For "nousb": Expects USB devices REMOVED from boot order (not just deprioritized)
+#              Verifies "Boot order AFTER" doesn't contain [USB] entries
 EDEN={{EdenConfig "eden.root"}}/{{EdenConfig "eden.bin-dist"}}/{{EdenConfig "eden.eden-bin"}}
 VM_NAME=$1
 EXPECTED=$2
@@ -1785,20 +3439,38 @@ echo "=== EVE-BOOT messages ==="
 EVE_BOOT_MSGS=$(echo "$CONSOLE" | grep -i "EVE-BOOT" || true)
 
 if [ -n "$EVE_BOOT_MSGS" ]; then
-    echo "$EVE_BOOT_MSGS" | head -20
+    echo "$EVE_BOOT_MSGS" | head -30
     echo ""
     echo "EVE-BOOT messages found"
 
     # Check for specific messages based on expected order
     if [ "$EXPECTED" = "usb" ]; then
-        if echo "$EVE_BOOT_MSGS" | grep -qi "USB boot priority ENABLED\|Moving.*USB"; then
+        if echo "$EVE_BOOT_MSGS" | grep -qi "USB boot priority ENABLED\|Moving.*to position"; then
             echo "SUCCESS: USB boot priority enabled messages found"
             echo "USB boot priority ENABLED"
         fi
     elif [ "$EXPECTED" = "nousb" ]; then
-        if echo "$EVE_BOOT_MSGS" | grep -qi "USB boot.*deprioritized\|nousb"; then
-            echo "SUCCESS: USB deprioritized messages found"
-            echo "USB boot deprioritized"
+        # Check for the new nousb behavior: USB devices are REMOVED completely
+        if echo "$EVE_BOOT_MSGS" | grep -qi "Removing Boot.*from boot order\|Removed.*USB devices"; then
+            echo "SUCCESS: USB devices removed from boot order"
+
+            # Additional verification: Check "Boot order AFTER" doesn't contain [USB]
+            BOOT_ORDER_AFTER=$(echo "$EVE_BOOT_MSGS" | grep -A 20 "Boot order AFTER" | grep -E "^\[EVE-BOOT\].*\[" || true)
+            if [ -n "$BOOT_ORDER_AFTER" ]; then
+                USB_IN_FINAL=$(echo "$BOOT_ORDER_AFTER" | grep "\[USB\]" || true)
+                if [ -z "$USB_IN_FINAL" ]; then
+                    echo "VERIFIED: Final boot order contains NO USB devices"
+                    echo "USB devices REMOVED from boot order"
+                else
+                    echo "WARNING: USB devices still appear in final boot order"
+                    echo "$USB_IN_FINAL"
+                fi
+            else
+                echo "USB boot disabled (nousb)"
+            fi
+        elif echo "$EVE_BOOT_MSGS" | grep -qi "USB boot disabled\|nousb"; then
+            echo "SUCCESS: USB boot disabled messages found"
+            echo "USB boot disabled (nousb)"
         fi
     fi
 else
@@ -2048,12 +3720,14 @@ CONFIG_APPLIED=false
 
 for ATTEMPT in $(seq 1 $MAX_ATTEMPTS); do
     # Check current config value from EVE's ConfigItemValueMap
-    # The config is stored in /persist/agentdebug/status/zedagent/ConfigItemValueMap/global.json
-    # Extract the StrValue for app.fml.resolution using grep and sed
-    RAW_OUTPUT=$($EDEN eve ssh 'cat /persist/agentdebug/status/zedagent/ConfigItemValueMap/global.json 2>/dev/null | grep -o "app.fml.resolution[^}]*"' 2>/dev/null || echo "")
+    # The config is stored in /persist/status/zedagent/ConfigItemValueMap/global.json
+    # Try multiple paths as the location may vary
+    # Use jq if available, otherwise fall back to grep/sed
+    RAW_OUTPUT=$($EDEN eve ssh 'for path in /persist/status/zedagent/ConfigItemValueMap/global.json /persist/agentdebug/status/zedagent/ConfigItemValueMap/global.json; do if [ -f "$path" ]; then cat "$path" 2>/dev/null; break; fi; done' 2>/dev/null || echo "")
 
-    # Extract StrValue from the output like: app.fml.resolution":{"Key":"app.fml.resolution","ItemType":3,"IntValue":0,"StrValue":"1024x768",...
-    CURRENT_RES=$(echo "$RAW_OUTPUT" | grep -o '"StrValue":"[^"]*"' | sed 's/"StrValue":"//; s/"$//')
+    # Extract StrValue for app.fml.resolution using grep and sed
+    # Match pattern: "app.fml.resolution":{"Key":"app.fml.resolution",...,"StrValue":"1024x768",...}
+    CURRENT_RES=$(echo "$RAW_OUTPUT" | grep -o '"app\.fml\.resolution"[^}]*}' | grep -o '"StrValue":"[^"]*"' | sed 's/"StrValue":"//; s/"$//')
 
     echo "Attempt $ATTEMPT/$MAX_ATTEMPTS: Current resolution config: '${CURRENT_RES:-<empty>}'"
 
@@ -2095,8 +3769,8 @@ echo "FML resolution applied (assumed)"
 exit 0
 
 -- verify-polling-interval.sh --
-# Verify EVE's polling interval for app boot config
-# $1 = expected interval: "normal" (10s) or "throttled" (5min)
+# Verify EVE's polling interval for app boot info/config
+# $1 = expected interval: "normal" (1min) or "throttled" (1hr)
 EDEN={{EdenConfig "eden.root"}}/{{EdenConfig "eden.bin-dist"}}/{{EdenConfig "eden.eden-bin"}}
 EXPECTED_INTERVAL=$1
 
@@ -2104,19 +3778,19 @@ echo "=== Verifying LPS polling interval ==="
 echo "Expected: $EXPECTED_INTERVAL"
 
 # Search EVE logs for throttle-related messages
-LOGS=$($EDEN eve ssh "logread 2>/dev/null | grep -iE 'appBootConfig|throttl|ticker|interval' | tail -30" 2>&1)
+LOGS=$($EDEN eve ssh "logread 2>/dev/null | grep -iE 'appBootInfo|appBootConfig|throttl|ticker|interval' | tail -30" 2>&1)
 
 echo "DEBUG: Checking EVE logs for polling interval info..."
 
 if [ "$EXPECTED_INTERVAL" = "throttled" ]; then
     # Look for signs of throttling (404 response, throttled interval)
-    if echo "$LOGS" | grep -qiE "throttl|StatusNotFound|404|5.*minute"; then
+    if echo "$LOGS" | grep -qiE "throttl|StatusNotFound|404|1.*hour"; then
         echo "Found throttle indicators in logs"
         echo "Polling interval: throttled"
         exit 0
     fi
     # Check for recent 404 in logs
-    RECENT_404=$($EDEN eve ssh "logread 2>/dev/null | grep -iE 'app-boot-config.*404|StatusNotFound.*appboot|appBootConfig.*404' | tail -5" 2>&1)
+    RECENT_404=$($EDEN eve ssh "logread 2>/dev/null | grep -iE 'appbootinfo.*404|StatusNotFound.*appboot|appBootInfo.*404' | tail -5" 2>&1)
     if [ -n "$RECENT_404" ]; then
         echo "Found 404 responses:"
         echo "$RECENT_404"
@@ -2134,7 +3808,7 @@ elif [ "$EXPECTED_INTERVAL" = "normal" ]; then
         exit 0
     fi
     # Check for recent successful fetches
-    RECENT_OK=$($EDEN eve ssh "logread 2>/dev/null | grep -iE 'Received app boot config|app-boot-config.*200|appBootConfig.*OK' | tail -5" 2>&1)
+    RECENT_OK=$($EDEN eve ssh "logread 2>/dev/null | grep -iE 'Received app boot config|postAppBootInfo.*200|appBootInfo.*OK' | tail -5" 2>&1)
     if [ -n "$RECENT_OK" ]; then
         echo "Found successful responses:"
         echo "$RECENT_OK"
@@ -2178,9 +3852,9 @@ else
     echo "WARNING: Config file may still exist"
 fi
 
-echo "Waiting for EVE to poll and receive 404..."
-# EVE polls every 10 seconds normally, so wait a bit
-sleep 15
+echo "Waiting for EVE to POST and receive 404..."
+# EVE POSTs every 1 minute normally, so wait a bit longer
+sleep 70
 echo "404 trigger complete"
 
 -- touch-lps-config.sh --
@@ -2219,7 +3893,8 @@ echo "=== Removing VM $VM_UUID from LPS config ==="
 # Send config with a dummy app that doesn't exist
 # EVE will see that $VM_UUID is no longer in the config and reset its boot order
 # We use a clearly fake UUID that won't match any real app
-JSON='{"app_configs":[{"id":"00000000-0000-0000-0000-000000000000","displayname":"dummy-app","usb_boot":"nousb"}]}'
+# Note: usb_boot uses protojson enum name format (BOOT_ORDER_NOUSB, not "nousb")
+JSON='{"app_configs":[{"id":"00000000-0000-0000-0000-000000000000","displayname":"dummy-app","usb_boot":"BOOT_ORDER_NOUSB"}]}'
 
 echo "Sending config without VM $VM_UUID:"
 echo "$JSON"
@@ -2256,20 +3931,20 @@ echo ""
 echo "Empty config sent - EVE should RESET ALL apps to default boot order"
 
 -- set-vm-boot-order-explicit-empty.sh --
-# Set boot order to explicit empty string for a VM.
-# This is different from not including the app - it explicitly sets usb_boot="".
-# EVE should detect this as a change (from "usb" to "") and reset to default.
+# Set boot order to explicit UNSPECIFIED for a VM.
+# This is different from not including the app - it explicitly sets usb_boot to BOOT_ORDER_UNSPECIFIED.
+# EVE should detect this as a change (from USB to UNSPECIFIED) and reset to default.
 # $1 = VM UUID
 EDEN={{EdenConfig "eden.root"}}/{{EdenConfig "eden.bin-dist"}}/{{EdenConfig "eden.eden-bin"}}
 VM_UUID=$1
 USB_FILE="{{template "appbootconfig_file"}}"
 
-echo "=== Setting explicit empty usb_boot for VM $VM_UUID ==="
+echo "=== Setting explicit BOOT_ORDER_UNSPECIFIED for VM $VM_UUID ==="
 
-# Include the app with usb_boot="" (explicit empty string)
-JSON="{\"app_configs\":[{\"id\":\"$VM_UUID\",\"displayname\":\"test-usb-boot-vm\",\"usb_boot\":\"\"}]}"
+# Include the app with usb_boot="BOOT_ORDER_UNSPECIFIED" (explicit default/unspecified)
+JSON="{\"app_configs\":[{\"id\":\"$VM_UUID\",\"displayname\":\"test-usb-boot-vm\",\"usb_boot\":\"BOOT_ORDER_UNSPECIFIED\"}]}"
 
-echo "Sending config with explicit empty usb_boot:"
+echo "Sending config with explicit BOOT_ORDER_UNSPECIFIED:"
 echo "$JSON"
 
 $EDEN sdn fwd eth0 {{template "port"}} -- {{template "ssh"}} "echo '$JSON' > $USB_FILE && touch $USB_FILE"
@@ -2413,5 +4088,144 @@ fi
 echo "App status Error field: $STATUS"
 echo "No active boot order warning"
 exit 0
+
+-- set-lps-config-for-other-app.sh --
+# Set LPS config for a DIFFERENT app (not the test VM)
+# This simulates: LPS returns 200 with app_configs but our test VM is NOT in the list
+EDEN={{EdenConfig "eden.root"}}/{{EdenConfig "eden.bin-dist"}}/{{EdenConfig "eden.eden-bin"}}
+USB_FILE="{{template "appbootconfig_file"}}"
+
+echo "=== Setting LPS config for a different app (test VM NOT in response) ==="
+
+# Create a fake UUID that doesn't match our test VM
+FAKE_UUID="00000000-0000-0000-0000-000000000000"
+
+# Write config with a different app (not our test VM)
+# Note: usb_boot uses protojson enum name format (BOOT_ORDER_USB, not "usb")
+JSON="{\"app_configs\":[{\"id\":\"$FAKE_UUID\",\"displayname\":\"other-app\",\"usb_boot\":\"BOOT_ORDER_USB\"}]}"
+
+$EDEN sdn fwd eth0 {{template "port"}} -- {{template "ssh"}} "echo '$JSON' > $USB_FILE && touch $USB_FILE"
+
+# Verify the write
+echo "=== LPS config (test VM NOT in list) ==="
+$EDEN sdn fwd eth0 {{template "port"}} -- {{template "ssh"}} "cat $USB_FILE"
+echo ""
+echo "LPS config set for different app - test VM will not find itself in response"
+
+-- set-lps-return-404.sh --
+# Configure LPS to return 404 for appbootinfo endpoint
+# This simulates: LPS has no config at all for this device
+EDEN={{EdenConfig "eden.root"}}/{{EdenConfig "eden.bin-dist"}}/{{EdenConfig "eden.eden-bin"}}
+USB_FILE="{{template "appbootconfig_file"}}"
+
+echo "=== Setting LPS to return 404 for appbootinfo ==="
+
+# Remove the config file - local-manager returns 404 when file doesn't exist
+$EDEN sdn fwd eth0 {{template "port"}} -- {{template "ssh"}} "rm -f $USB_FILE"
+
+# Verify removal
+RESULT=$($EDEN sdn fwd eth0 {{template "port"}} -- {{template "ssh"}} "test -f $USB_FILE && echo 'EXISTS' || echo 'REMOVED'" 2>&1)
+
+if echo "$RESULT" | grep -q "REMOVED"; then
+    echo "LPS config file removed - endpoint will return 404"
+else
+    echo "WARNING: Config file may still exist"
+fi
+
+echo "LPS now configured to return 404 for appbootinfo"
+
+-- verify-appbootinfo.sh --
+# Verify that the appbootinfo endpoint receives correct boot order and source from EVE
+# Usage: verify-appbootinfo.sh <vm_uuid> <expected_boot_order> <expected_source>
+# Where expected_boot_order is: BOOT_ORDER_USB, BOOT_ORDER_NOUSB, BOOT_ORDER_UNSPECIFIED
+# And expected_source is: BOOT_ORDER_SOURCE_LPS, BOOT_ORDER_SOURCE_CONTROLLER, BOOT_ORDER_SOURCE_DEVICE_PROPERTY, BOOT_ORDER_SOURCE_UNSPECIFIED
+#
+# NOTE: Protobuf JSON encoding omits fields with default values (0 = UNSPECIFIED).
+# So when expecting UNSPECIFIED, we check that the field is MISSING from the JSON.
+EDEN={{EdenConfig "eden.root"}}/{{EdenConfig "eden.bin-dist"}}/{{EdenConfig "eden.eden-bin"}}
+APPBOOTINFO_FILE="/mnt/appbootinfo.json"
+
+VM_UUID=$1
+EXPECTED_BOOT_ORDER=$2
+EXPECTED_SOURCE=$3
+
+echo "=== Verifying appbootinfo for VM $VM_UUID ==="
+echo "Expected boot_order: $EXPECTED_BOOT_ORDER"
+echo "Expected source: $EXPECTED_SOURCE"
+
+# Wait for appbootinfo file to be populated (EVE posts every ~1 minute)
+MAX_WAIT=120
+WAIT_INTERVAL=10
+ELAPSED=0
+
+while [ $ELAPSED -lt $MAX_WAIT ]; do
+    # Read the appbootinfo file
+    APPBOOTINFO=$($EDEN sdn fwd eth0 {{template "port"}} -- {{template "ssh"}} "cat $APPBOOTINFO_FILE 2>/dev/null" 2>&1)
+
+    if echo "$APPBOOTINFO" | grep -q "$VM_UUID"; then
+        echo "DEBUG: Found VM in appbootinfo:"
+        # Get 5 lines after UUID to capture all fields
+        VM_ENTRY=$(echo "$APPBOOTINFO" | grep -A5 "$VM_UUID" | head -6)
+        echo "$VM_ENTRY"
+
+        BOOT_ORDER_OK=0
+        SOURCE_OK=0
+
+        # Check boot_order
+        # For UNSPECIFIED: field should be MISSING (protobuf omits default values)
+        if [ "$EXPECTED_BOOT_ORDER" = "BOOT_ORDER_UNSPECIFIED" ]; then
+            if echo "$VM_ENTRY" | grep -q "bootOrder\|boot_order"; then
+                echo "DEBUG: boot_order field present but expected UNSPECIFIED (missing)"
+            else
+                echo "PASS: boot_order is UNSPECIFIED (field not present)"
+                BOOT_ORDER_OK=1
+            fi
+        else
+            # For non-UNSPECIFIED: field should contain the expected value
+            if echo "$VM_ENTRY" | grep -q "\"bootOrder\":.*\"$EXPECTED_BOOT_ORDER\""; then
+                echo "PASS: boot_order matches $EXPECTED_BOOT_ORDER"
+                BOOT_ORDER_OK=1
+            elif echo "$VM_ENTRY" | grep -q "\"boot_order\":.*\"$EXPECTED_BOOT_ORDER\""; then
+                echo "PASS: boot_order matches $EXPECTED_BOOT_ORDER"
+                BOOT_ORDER_OK=1
+            else
+                echo "DEBUG: boot_order does not match yet"
+            fi
+        fi
+
+        # Check source
+        # For UNSPECIFIED: field should be MISSING (protobuf omits default values)
+        if [ "$EXPECTED_SOURCE" = "BOOT_ORDER_SOURCE_UNSPECIFIED" ]; then
+            if echo "$VM_ENTRY" | grep -q "\"source\""; then
+                echo "DEBUG: source field present but expected UNSPECIFIED (missing)"
+            else
+                echo "PASS: source is UNSPECIFIED (field not present)"
+                SOURCE_OK=1
+            fi
+        else
+            # For non-UNSPECIFIED: field should contain the expected value
+            if echo "$VM_ENTRY" | grep -q "\"source\":.*\"$EXPECTED_SOURCE\""; then
+                echo "PASS: source matches $EXPECTED_SOURCE"
+                SOURCE_OK=1
+            else
+                echo "DEBUG: source does not match yet"
+            fi
+        fi
+
+        if [ "$BOOT_ORDER_OK" = "1" ] && [ "$SOURCE_OK" = "1" ]; then
+            echo "APPBOOTINFO_VERIFIED: boot_order=$EXPECTED_BOOT_ORDER, source=$EXPECTED_SOURCE"
+            exit 0
+        fi
+    fi
+
+    echo "Waiting for appbootinfo to be updated... ($ELAPSED/$MAX_WAIT seconds)"
+    sleep $WAIT_INTERVAL
+    ELAPSED=$((ELAPSED + WAIT_INTERVAL))
+done
+
+echo "APPBOOTINFO_ERROR: Timeout waiting for expected values"
+echo "Last appbootinfo content:"
+$EDEN sdn fwd eth0 {{template "port"}} -- {{template "ssh"}} "cat $APPBOOTINFO_FILE 2>/dev/null" 2>&1 || true
+exit 1
 
 

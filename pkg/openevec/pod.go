@@ -22,6 +22,7 @@ import (
 	edgeRegistry "github.com/lf-edge/edge-containers/pkg/registry"
 	"github.com/lf-edge/edge-containers/pkg/resolver"
 	"github.com/lf-edge/eve-api/go/config"
+	"github.com/lf-edge/eve-api/go/evecommon"
 	"github.com/lf-edge/eve-api/go/info"
 	"github.com/lf-edge/eve-api/go/metrics"
 	uuid "github.com/satori/go.uuid"
@@ -145,6 +146,7 @@ func (openEVEC *OpenEVEC) PodDeploy(appLink string, pc PodConfig, cfg *EdenSetup
 	opts = append(opts, expect.WithDatastoreOverride(pc.DatastoreOverride))
 	opts = append(opts, expect.WithStartDelay(pc.StartDelay))
 	opts = append(opts, expect.WithPinCpus(pc.PinCpus))
+	opts = append(opts, expect.WithBootOrder(pc.BootOrder))
 	expectation := expect.AppExpectationFromURL(ctrl, dev, appLink, pc.Name, opts...)
 	appInstanceConfig := expectation.Application()
 	dev.SetApplicationInstanceConfig(append(dev.GetApplicationInstances(), appInstanceConfig.Uuidandversion.Uuid))
@@ -473,7 +475,7 @@ func (openEVEC *OpenEVEC) PodLogs(appName string, outputTail uint, outputFields 
 	return nil
 }
 
-func (openEVEC *OpenEVEC) PodModify(appName string, podNetworks, portPublish, acl, vlans []string, startDelay uint32) error {
+func (openEVEC *OpenEVEC) PodModify(appName string, podNetworks, portPublish, acl, vlans []string, startDelay uint32, bootOrder string) error {
 	changer := &adamChanger{}
 	ctrl, dev, err := changer.getControllerAndDevFromConfig(openEVEC.cfg)
 	if err != nil {
@@ -556,6 +558,20 @@ func (openEVEC *OpenEVEC) PodModify(appName string, podNetworks, portPublish, ac
 			}
 			if startDelay != 0 {
 				app.StartDelayInSeconds = appInstanceConfig.StartDelayInSeconds
+			}
+			// Update boot order if specified
+			if bootOrder != "" {
+				if app.Fixedresources == nil {
+					app.Fixedresources = &config.VmConfig{}
+				}
+				switch bootOrder {
+				case "usb":
+					app.Fixedresources.BootOrder = evecommon.BootOrder_BOOT_ORDER_USB
+				case "nousb":
+					app.Fixedresources.BootOrder = evecommon.BootOrder_BOOT_ORDER_NOUSB
+				default:
+					app.Fixedresources.BootOrder = evecommon.BootOrder_BOOT_ORDER_UNSPECIFIED
+				}
 			}
 			// now we only change networks
 			app.Interfaces = appInstanceConfig.Interfaces

@@ -6,6 +6,7 @@ import (
 
 	"github.com/lf-edge/eden/pkg/defaults"
 	"github.com/lf-edge/eve-api/go/config"
+	"github.com/lf-edge/eve-api/go/evecommon"
 )
 
 // VolumeType defines type of empty volumes to use
@@ -307,5 +308,20 @@ func WithPinCpus(pinCpus bool) ExpectationOption {
 	return func(expectation *AppExpectation) {
 		expectation.pinCpus = pinCpus
 
+	}
+}
+
+// WithBootOrder sets the boot order for the VM.
+// Supported values: "" (default), "usb" (prioritize USB), "nousb" (deprioritize USB)
+func WithBootOrder(bootOrder string) ExpectationOption {
+	return func(expectation *AppExpectation) {
+		switch bootOrder {
+		case "usb":
+			expectation.bootOrder = evecommon.BootOrder_BOOT_ORDER_USB
+		case "nousb":
+			expectation.bootOrder = evecommon.BootOrder_BOOT_ORDER_NOUSB
+		default:
+			expectation.bootOrder = evecommon.BootOrder_BOOT_ORDER_UNSPECIFIED
+		}
 	}
 }

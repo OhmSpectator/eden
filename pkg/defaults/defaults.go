@@ -41,6 +41,7 @@ const (
 	DefaultDomain               = "mydomain.adam"
 	DefaultIP                   = "192.168.0.1"
 	DefaultEVEIP                = "192.168.1.2"
+	DefaultQemuGatewayIP        = "192.168.0.2" // QEMU SLIRP gateway - this is how EVE reaches the host
 	DefaultEserverPort          = 8888
 	DefaultTelnetPort           = 17777
 	DefaultQemuMonitorPort      = 7788

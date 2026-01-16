@@ -40,7 +40,7 @@ func newCertsCmd(cfg *openevec.EdenSetupArgs) *cobra.Command {
 	certsCmd.Flags().StringVarP(&cfg.Eden.CertsDir, "certs-dist", "o", filepath.Join(currentPath, defaults.DefaultDist, defaults.DefaultCertsDist), "directory to save")
 	certsCmd.Flags().StringVarP(&cfg.Adam.CertsDomain, "domain", "d", defaults.DefaultDomain, "FQDN for certificates")
 	certsCmd.Flags().StringVarP(&cfg.Adam.CertsIP, "ip", "i", defaults.DefaultIP, "IP address to use")
-	certsCmd.Flags().StringVarP(&cfg.Adam.CertsEVEIP, "eve-ip", "", defaults.DefaultEVEIP, "IP address to use for EVE")
+	certsCmd.Flags().StringVarP(&cfg.Adam.CertsEVEIP, "eve-ip", "", defaults.DefaultEVEIP, "IP address for EVE to reach Adam")
 	certsCmd.Flags().StringVarP(&cfg.Eve.CertsUUID, "uuid", "u", defaults.DefaultUUID, "UUID to use for device")
 	certsCmd.Flags().StringVar(&cfg.Eve.Ssid, "ssid", "", "SSID for wifi")
 	certsCmd.Flags().StringVar(&cfg.Eve.Password, "password", "", "password for wifi")

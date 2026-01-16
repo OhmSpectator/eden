@@ -15,7 +15,7 @@ func newSetupCmd(configName, verbosity *string) *cobra.Command {
 	cfg := &openevec.EdenSetupArgs{}
 	var configDir, softSerial, zedControlURL, ipxeOverride string
 	var grubOptions []string
-	var netboot, installer bool
+	var netboot, installer, useQemuGateway bool
 
 	var setupCmd = &cobra.Command{
 		Use:               "setup",
@@ -23,6 +23,10 @@ func newSetupCmd(configName, verbosity *string) *cobra.Command {
 		Long:              `Setup harness.`,
 		PersistentPreRunE: preRunViperLoadFunction(cfg, configName, verbosity),
 		Run: func(cmd *cobra.Command, args []string) {
+			// If --eve-use-qemu-gateway is set, override eve-ip with QEMU gateway
+			if useQemuGateway {
+				cfg.Adam.CertsEVEIP = defaults.DefaultQemuGatewayIP
+			}
 			if err := openEVEC.SetupEden(*configName, configDir, softSerial, zedControlURL, ipxeOverride, grubOptions, netboot, installer); err != nil {
 
 				log.Fatalf("Setup eden failed: %s", err)
@@ -47,7 +51,8 @@ func newSetupCmd(configName, verbosity *string) *cobra.Command {
 	setupCmd.Flags().StringVarP(&cfg.Eden.CertsDir, "certs-dist", "o", cfg.Eden.CertsDir, "directory with certs")
 	setupCmd.Flags().StringVarP(&cfg.Adam.CertsDomain, "domain", "d", defaults.DefaultDomain, "FQDN for certificates")
 	setupCmd.Flags().StringVarP(&cfg.Adam.CertsIP, "ip", "i", defaults.DefaultIP, "IP address to use")
-	setupCmd.Flags().StringVarP(&cfg.Adam.CertsEVEIP, "eve-ip", "", defaults.DefaultEVEIP, "IP address to use for EVE")
+	setupCmd.Flags().StringVarP(&cfg.Adam.CertsEVEIP, "eve-ip", "", defaults.DefaultEVEIP, "IP address for EVE to reach Adam")
+	setupCmd.Flags().BoolVar(&useQemuGateway, "eve-use-qemu-gateway", false, "Use QEMU SLIRP gateway IP (192.168.0.2) for EVE to reach Adam")
 	setupCmd.Flags().StringVarP(&cfg.Eve.CertsUUID, "uuid", "u", defaults.DefaultUUID, "UUID to use for device")
 
 	setupCmd.Flags().StringVarP(&cfg.Adam.Tag, "adam-tag", "", defaults.DefaultAdamTag, "Adam tag")

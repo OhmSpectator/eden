@@ -92,8 +92,10 @@ while [[ $# -gt 0 ]]; do
 done
 
 # Store cloud images outside dist to survive clean
-CACHE_DIR="/home/nikolay/projects/eden/.cache"
-USB_DISK_DIR="/home/nikolay/projects/eden/dist"
+# Get the directory where this script is located (eden project root)
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CACHE_DIR="$SCRIPT_DIR/.cache"
+USB_DISK_DIR="$SCRIPT_DIR/dist"
 USB_DISK_IMAGE="$USB_DISK_DIR/usb-boot.img"
 CLOUD_IMAGE="$CACHE_DIR/debian-cloud.raw"
 
@@ -265,6 +267,26 @@ echo ""
 echo "=== Step 4: Running Eden setup ==="
 ./eden setup
 
+# Step 4.5: Fix hosts file for QEMU user-mode networking
+# QEMU user-mode networking uses 192.168.0.2 as the gateway to reach the host
+# The default Eden setup uses the host's external IP which is not reachable from inside QEMU
+echo ""
+echo "=== Step 4.5: Fixing hosts file for QEMU networking ==="
+QEMU_GATEWAY_IP="192.168.0.2"
+ADAM_DOMAIN="mydomain.adam"
+# Eden stores certs in dist/default-certs (relative to eden project root)
+CERTS_DIR="./dist/default-certs"
+HOSTS_FILE="$CERTS_DIR/hosts"
+if [ -d "$CERTS_DIR" ]; then
+    echo "Setting $ADAM_DOMAIN to point to QEMU gateway $QEMU_GATEWAY_IP"
+    echo "$QEMU_GATEWAY_IP $ADAM_DOMAIN" > "$HOSTS_FILE"
+    echo "Hosts file content:"
+    cat "$HOSTS_FILE"
+else
+    echo "WARNING: Certs directory not found: $CERTS_DIR"
+    echo "The hosts file may have incorrect IP. EVE might not connect to Adam."
+fi
+
 # Step 5: Configure port forwarding
 echo ""
 echo "=== Step 5: Configuring port forwarding ==="
@@ -311,7 +333,7 @@ if [ "$ONBOARD_SUCCESS" != "true" ]; then
     echo "EVE failed to register with Adam after multiple attempts."
     echo ""
     echo "Debugging steps:"
-    echo "  1. Check EVE log: tail -100 /home/nikolay/projects/eden/dist/default-eve.log"
+    echo "  1. Check EVE log: tail -100 ./dist/default-eve.log"
     echo "  2. Check EVE status: ./eden eve status"
     echo "  3. Try manual onboard: ./eden eve onboard"
     echo "  4. Check if EVE booted: ./eden eve ssh 'uptime'"

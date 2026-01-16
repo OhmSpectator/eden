@@ -301,11 +301,65 @@ echo ""
 echo "=== Step 6: Starting Eden ==="
 ./eden start
 
-# Step 7: Wait and onboard EVE
+# Step 7: Wait for EVE to start and fix hosts file
 echo ""
 echo "=== Step 7: Waiting for EVE to start ==="
 sleep 30
 
+# Fix hosts file inside EVE - the config partition was created with wrong IP
+# QEMU user-mode networking requires using gateway IP 192.168.0.2 to reach host
+# We must use the serial console (telnet) since EVE SSH requires connection to Adam first
+echo ""
+echo "=== Step 7.5: Fixing hosts file inside EVE via serial console ==="
+QEMU_GATEWAY_IP="192.168.0.2"
+ADAM_DOMAIN="mydomain.adam"
+TELNET_PORT=17777
+echo "Updating /config/hosts inside EVE to point $ADAM_DOMAIN to $QEMU_GATEWAY_IP"
+echo "Using serial console on port $TELNET_PORT"
+
+# Send commands via the serial console using expect-like behavior with bash
+# We need to wait for the shell prompt and send commands
+MAX_CONSOLE_RETRIES=5
+CONSOLE_SUCCESS=false
+for i in $(seq 1 $MAX_CONSOLE_RETRIES); do
+    echo "Console attempt $i of $MAX_CONSOLE_RETRIES..."
+    # Use a subshell with timeout to send commands via netcat
+    RESULT=$(timeout 15 bash -c '
+        {
+            sleep 2
+            echo ""
+            sleep 1
+            echo "echo \"'"$QEMU_GATEWAY_IP"' '"$ADAM_DOMAIN"'\" > /config/hosts"
+            sleep 1
+            echo "sync"
+            sleep 1
+            echo "cat /config/hosts"
+            sleep 2
+        } | nc localhost '"$TELNET_PORT"' 2>/dev/null
+    ' 2>&1) || true
+
+    # Check if the output contains our expected IP
+    if echo "$RESULT" | grep -q "$QEMU_GATEWAY_IP"; then
+        CONSOLE_SUCCESS=true
+        echo "Hosts file updated successfully inside EVE"
+        echo "Result: $RESULT"
+        break
+    else
+        echo "Console command may not have succeeded, retrying..."
+        sleep 5
+    fi
+done
+
+if [ "$CONSOLE_SUCCESS" != "true" ]; then
+    echo "WARNING: Could not verify hosts file update via serial console."
+    echo "You may need to manually fix it via: telnet localhost $TELNET_PORT"
+    echo "Then run: echo '$QEMU_GATEWAY_IP $ADAM_DOMAIN' > /config/hosts && sync"
+    echo ""
+    echo "Continuing anyway - the update may have worked..."
+fi
+
+echo ""
+echo "=== Step 8: Onboarding EVE ==="
 echo "Onboarding EVE..."
 # Try onboarding with retries
 MAX_ONBOARD_RETRIES=3
@@ -342,9 +396,9 @@ if [ "$ONBOARD_SUCCESS" != "true" ]; then
     exit 1
 fi
 
-# Step 8: Verify USB disk is visible in EVE
+# Step 9: Verify USB disk is visible in EVE
 echo ""
-echo "=== Step 8: Verifying USB disk setup ==="
+echo "=== Step 9: Verifying USB disk setup ==="
 echo "Checking USB devices in EVE..."
 ./eden eve ssh 'lsusb' || true
 echo ""

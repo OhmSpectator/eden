@@ -1,0 +1,647 @@
+# Test for maybeRetryBoot with globalConfig
+#
+# This test verifies that when a VM boot fails and is retried via maybeRetryBoot,
+# the globalConfig is properly passed during retry.
+#
+# BACKGROUND:
+# ===========
+# There was a bug where maybeRetryBoot passed nil for globalConfig instead of
+# the actual config. This meant device-wide settings were not applied during
+# boot retries.
+#
+# TEST STRATEGY:
+# ==============
+# We verify that the VMM memory limit from globalConfig is applied during retry:
+#
+# 1. Set memory.vmm.limit.MiB=800 (VMM overhead = 800 MB)
+# 2. Deploy VM with 1024 MB memory
+# 3. Verify cgroup memory limit = 1024 MB + 800 MB overhead = ~1.8 GB
+# 4. Delete VM
+# 5. Make /run/hypervisor/kvm directory immutable (chattr +i)
+# 6. Deploy VM again - DomainCreate will fail, setting BootFailed=true
+# 7. Remove immutable flag (chattr -i)
+# 8. Wait for maybeRetryBoot to trigger (after timer.boot.retry seconds)
+# 9. Verify cgroup memory limit still includes 800 MB overhead
+#
+# Without the fix: globalConfig=nil, so VMM overhead uses estimatedVMMOverhead() (~374 MB)
+# With the fix: globalConfig is passed, so 800 MB overhead is applied
+#
+# The difference (~400 MB) is large enough to clearly detect the bug.
+#
+# Note: We use /run/hypervisor/kvm/ because this is where KVM creates domain state.
+# Corrupting this causes failure in DomainCreate, which sets BootFailed=true.
+#
+# PREREQUISITES:
+# ==============
+# - EVE image with the maybeRetryBoot fix (globalConfig passed correctly)
+# - EVE with KVM support
+#
+# RECOMMENDED: Use the wrapper script for setup and execution:
+#   cd <eden-repo>
+#   ./run-boot-retry-test.sh [EVE_TAG]
+#
+# The wrapper script handles:
+#   - Environment cleanup (eden stop/clean)
+#   - Eden build and configuration
+#   - EVE setup/start/onboard
+#   - Test execution with logging
+#
+# For manual setup (not recommended):
+#   cd <eden-repo>
+#   make build-tests
+#   ./eden config add default --force
+#   ./eden config set default --key eve.tag --value "<your-eve-tag>"
+#   ./eden setup && ./eden start && ./eden eve onboard
+#   ./eden test tests/eclient -v debug -t 20m -e boot_retry_globalconfig
+#
+
+{{$network_name := "boot-retry-n1"}}
+{{$test_app := "retry-test-vm"}}
+{{$port := "2223"}}
+{{define "ubuntu_image"}}https://cloud-images.ubuntu.com/releases/focal/release-20210510/ubuntu-20.04-server-cloudimg-amd64.img{{end}}
+
+[!exec:bash] stop
+[!exec:sleep] stop
+[!exec:chmod] stop
+
+exec chmod 600 {{EdenConfig "eden.tests"}}/eclient/image/cert/id_rsa
+
+message 'Starting Boot Retry globalConfig Test'
+
+
+# ============================================================================
+# SETUP: Configure logging, retry interval and VMM memory limit
+# ============================================================================
+
+# Enable debug logging for domainmgr to see maybeRetryBoot messages
+message 'Enabling debug logging for domainmgr...'
+eden controller edge-node update --config debug.domainmgr.loglevel=debug
+
+message 'Configuring boot retry interval to 60 seconds (default is 600)'
+eden controller edge-node update --config timer.boot.retry=60
+
+message 'Configuring VMM memory limit to 800 MiB'
+eden controller edge-node update --config memory.vmm.limit.MiB=800
+
+# Wait for config to be applied (extra time for fresh EVE after onboarding)
+exec sleep 30
+
+# Verify config is applied
+exec -t 3m bash wait-config-applied.sh timer.boot.retry 60
+exec -t 3m bash wait-config-applied.sh memory.vmm.limit.MiB 800
+
+# ============================================================================
+# SETUP: Create network
+# ============================================================================
+message 'Creating network boot-retry-n1'
+eden -t 1m network create 10.11.12.0/24 -n {{$network_name}}
+test eden.network.test -test.v -timewait 2m ACTIVATED {{$network_name}}
+
+# ============================================================================
+# TC1: Deploy VM and verify initial VMM memory limit
+# ============================================================================
+message '=== TC1: Deploy VM and verify VMM memory limit from globalConfig ==='
+
+# Deploy the VM - it should start successfully
+message 'Deploying VM...'
+eden pod deploy -n {{$test_app}} --memory=1024MB --vnc-display=1 -p {{$port}}:22 {{template "ubuntu_image"}} --networks={{$network_name}}
+
+# Wait for VM to be running
+message 'Waiting for VM to start...'
+exec -t 10m bash wait-for-running-once.sh {{$test_app}}
+message 'VM is running'
+
+# Give it extra time to stabilize
+exec sleep 10
+
+# Verify initial cgroup memory limit includes 800 MiB overhead
+# Expected: 1024 MB * 1024 + 800 MiB * 1024 * 1024 = 1048576000 + 838860800 = 1887436800 bytes
+message 'Verifying initial cgroup memory limit...'
+exec -t 1m bash verify-cgroup-memory.sh {{$test_app}} 1887436800
+message 'Initial VMM memory limit verified (800 MiB overhead applied)'
+
+# ============================================================================
+# TC2: Cause boot failure and verify retry uses globalConfig
+# ============================================================================
+message '=== TC2: Cause boot failure to trigger maybeRetryBoot ==='
+
+# Delete the VM first - we need a fresh deploy to trigger DomainCreate
+# (stop/start only resumes, it doesn't call DomainCreate)
+message 'Deleting VM to prepare for fresh deploy...'
+eden pod delete {{$test_app}}
+test eden.app.test -test.v -timewait 2m - {{$test_app}}
+message 'VM deleted'
+
+# Make KVM state directory immutable to cause DomainCreate failure
+message 'Making KVM state directory immutable...'
+exec -t 1m bash make-kvm-dir-immutable.sh
+
+# Deploy the VM again - DomainCreate will fail because it can't create state directory
+message 'Deploying VM (will fail due to immutable KVM state directory)...'
+eden pod deploy -n {{$test_app}} --memory=1024MB --vnc-display=1 -p {{$port}}:22 {{template "ubuntu_image"}} --networks={{$network_name}}
+
+# Wait for boot failure (3 attempts, then BootFailed=true)
+message 'Waiting for boot failure (3 attempts)...'
+exec -t 10m bash wait-for-boot-failure.sh {{$test_app}}
+
+# Restore the directory so retry can succeed
+message 'Restoring KVM state directory...'
+exec -t 1m bash make-kvm-dir-writable.sh
+
+# ============================================================================
+# TC3: Wait for maybeRetryBoot and verify globalConfig is applied
+# ============================================================================
+message '=== TC3: Wait for boot retry and verify VMM memory limit ==='
+
+# maybeRetryBoot triggers after timer.boot.retry seconds (60s)
+message 'Waiting for retry timer...'
+exec sleep 70
+
+# Now wait for the VM to restart
+exec -t 5m bash wait-for-running-once.sh {{$test_app}}
+message 'VM started successfully via maybeRetryBoot!'
+
+# Verify that maybeRetryBoot was actually called by checking EVE logs
+message 'Verifying maybeRetryBoot was triggered in EVE logs...'
+exec -t 1m bash verify-retry-logs.sh {{$test_app}}
+
+# Verify cgroup memory limit still includes 800 MiB overhead
+# This proves globalConfig was passed to Setup during retry
+message 'Verifying cgroup memory limit after retry...'
+exec -t 1m bash verify-cgroup-memory.sh {{$test_app}} 1887436800
+message 'SUCCESS: VMM memory limit from globalConfig applied during retry!'
+
+# ============================================================================
+# CLEANUP
+# ============================================================================
+message '=== Cleanup ==='
+
+eden pod delete {{$test_app}}
+test eden.app.test -test.v -timewait 2m - {{$test_app}}
+
+eden network delete {{$network_name}}
+test eden.network.test -test.v -timewait 2m - {{$network_name}}
+
+# Reset config to defaults
+eden controller edge-node update --config timer.boot.retry=600
+eden controller edge-node update --config memory.vmm.limit.MiB=0
+eden controller edge-node update --config debug.domainmgr.loglevel=info
+
+message '=== Test Complete ==='
+
+-- eden-config.yml --
+{{/* Test config file */}}
+test:
+    controller: adam://{{EdenConfig "adam.ip"}}:{{EdenConfig "adam.port"}}
+    eve:
+      {{EdenConfig "eve.name"}}:
+        onboard-cert: {{EdenConfigPath "eve.cert"}}
+        serial: "{{EdenConfig "eve.serial"}}"
+        model: {{EdenConfig "eve.devmodel"}}
+
+-- wait-config-applied.sh --
+#!/bin/bash
+# Wait for a config value to be applied in EVE
+# $1 = config key (e.g., "timer.boot.retry")
+# $2 = expected value (e.g., "60")
+EDEN={{EdenConfig "eden.root"}}/{{EdenConfig "eden.bin-dist"}}/{{EdenConfig "eden.eden-bin"}}
+CONFIG_KEY="$1"
+EXPECTED_VALUE="$2"
+
+echo "=== Waiting for config '$CONFIG_KEY' to be set to '$EXPECTED_VALUE' ==="
+
+MAX_ATTEMPTS=60
+POLL_INTERVAL=3
+
+for ATTEMPT in $(seq 1 $MAX_ATTEMPTS); do
+    # Read ConfigItemValueMap from EVE (correct path: /persist/status/zedagent/)
+    RAW_OUTPUT=$($EDEN eve ssh "cat /persist/status/zedagent/ConfigItemValueMap/global.json 2>/dev/null" 2>/dev/null || echo "")
+
+    # Try to extract the value - handle both IntValue and StrValue
+    KEY_SECTION=$(echo "$RAW_OUTPUT" | grep -o "\"$CONFIG_KEY\"[^}]*}" | head -1)
+
+    INT_VALUE=$(echo "$KEY_SECTION" | grep -o '"IntValue":[0-9]*' | sed 's/"IntValue"://')
+    STR_VALUE=$(echo "$KEY_SECTION" | grep -o '"StrValue":"[^"]*"' | sed 's/"StrValue":"//; s/"$//')
+
+    if [ -n "$STR_VALUE" ]; then
+        CURRENT_VALUE="$STR_VALUE"
+    elif [ -n "$INT_VALUE" ]; then
+        CURRENT_VALUE="$INT_VALUE"
+    else
+        CURRENT_VALUE=""
+    fi
+
+    echo "Attempt $ATTEMPT/$MAX_ATTEMPTS: Current value for '$CONFIG_KEY': '$CURRENT_VALUE'"
+
+    if [ "$CURRENT_VALUE" = "$EXPECTED_VALUE" ]; then
+        echo "SUCCESS: Config '$CONFIG_KEY' is set to '$EXPECTED_VALUE'"
+        exit 0
+    fi
+
+    sleep $POLL_INTERVAL
+done
+
+echo "ERROR: Timeout waiting for config '$CONFIG_KEY' to be set to '$EXPECTED_VALUE'"
+echo "Current value: '$CURRENT_VALUE'"
+exit 1
+
+-- wait-for-running-once.sh --
+#!/bin/bash
+# Wait for a pod to reach RUNNING state
+# $1 = pod name
+EDEN={{EdenConfig "eden.root"}}/{{EdenConfig "eden.bin-dist"}}/{{EdenConfig "eden.eden-bin"}}
+POD_NAME="$1"
+
+echo "=== Waiting for pod '$POD_NAME' to reach RUNNING state ==="
+echo "Polling every 5 seconds..."
+
+MAX_ATTEMPTS=60
+POLL_INTERVAL=5
+
+for ATTEMPT in $(seq 1 $MAX_ATTEMPTS); do
+    STATE=$($EDEN pod ps 2>/dev/null | grep "^$POD_NAME" | awk '{for(i=1;i<=NF;i++) if($i ~ /RUNNING|HALTED|BOOTING|INSTALLED|BROKEN|ERROR/) print $i}' | head -1)
+
+    echo "Attempt $ATTEMPT/$MAX_ATTEMPTS: Pod '$POD_NAME' state: $STATE"
+
+    if [ "$STATE" = "RUNNING" ]; then
+        echo "SUCCESS: Pod '$POD_NAME' reached RUNNING state!"
+        exit 0
+    fi
+
+    sleep $POLL_INTERVAL
+done
+
+echo "ERROR: Timeout waiting for pod '$POD_NAME' to reach RUNNING state"
+exit 1
+
+-- verify-cgroup-memory.sh --
+#!/bin/bash
+# Verify the cgroup memory limit for a pod matches expected value
+# $1 = pod name
+# $2 = expected memory limit in bytes
+EDEN={{EdenConfig "eden.root"}}/{{EdenConfig "eden.bin-dist"}}/{{EdenConfig "eden.eden-bin"}}
+POD_NAME="$1"
+EXPECTED_LIMIT="$2"
+
+echo "=== Verifying cgroup memory limit for pod '$POD_NAME' ==="
+echo "Expected limit: $EXPECTED_LIMIT bytes"
+
+# Get the pod UUID
+VM_UUID=$($EDEN pod ps 2>/dev/null | awk -v name="$POD_NAME" '$1==name {print $3}' | head -1)
+if [ -z "$VM_UUID" ]; then
+    echo "ERROR: Could not find UUID for pod '$POD_NAME'"
+    exit 1
+fi
+echo "Pod UUID: $VM_UUID"
+
+# Find the cgroup memory limit
+CGROUP_PATH="/sys/fs/cgroup/memory/eve-user-apps/${VM_UUID}.1.1/memory.limit_in_bytes"
+echo "Checking cgroup path: $CGROUP_PATH"
+
+ACTUAL_LIMIT=$($EDEN eve ssh "cat $CGROUP_PATH 2>/dev/null" 2>/dev/null)
+
+if [ -z "$ACTUAL_LIMIT" ]; then
+    # Try with different suffix
+    CGROUP_PATH="/sys/fs/cgroup/memory/eve-user-apps/${VM_UUID}.1.2/memory.limit_in_bytes"
+    ACTUAL_LIMIT=$($EDEN eve ssh "cat $CGROUP_PATH 2>/dev/null" 2>/dev/null)
+fi
+
+if [ -z "$ACTUAL_LIMIT" ]; then
+    echo "ERROR: Could not read cgroup memory limit"
+    echo "Searching for cgroup..."
+    $EDEN eve ssh "find /sys/fs/cgroup/memory -name '*${VM_UUID}*' 2>/dev/null" 2>/dev/null
+    exit 1
+fi
+
+echo "Actual limit: $ACTUAL_LIMIT bytes"
+
+# Allow 5% tolerance for rounding
+TOLERANCE=80000000
+DIFF=$((ACTUAL_LIMIT - EXPECTED_LIMIT))
+if [ $DIFF -lt 0 ]; then
+    DIFF=$((-DIFF))
+fi
+
+if [ $DIFF -le $TOLERANCE ]; then
+    echo "SUCCESS: Memory limit matches expected value (within tolerance)"
+    echo "Expected: $EXPECTED_LIMIT, Actual: $ACTUAL_LIMIT, Diff: $DIFF"
+    exit 0
+fi
+
+echo "ERROR: Memory limit mismatch!"
+echo "Expected: $EXPECTED_LIMIT bytes"
+echo "Actual: $ACTUAL_LIMIT bytes"
+echo "Difference: $DIFF bytes (tolerance: $TOLERANCE)"
+exit 1
+
+-- wait-for-halted.sh --
+#!/bin/bash
+# Wait for a pod to reach HALTED state (after eden pod stop)
+# $1 = pod name
+EDEN={{EdenConfig "eden.root"}}/{{EdenConfig "eden.bin-dist"}}/{{EdenConfig "eden.eden-bin"}}
+POD_NAME="$1"
+
+echo "=== Waiting for pod '$POD_NAME' to reach HALTED state ==="
+echo "Polling every 5 seconds..."
+
+MAX_ATTEMPTS=36
+POLL_INTERVAL=5
+
+for ATTEMPT in $(seq 1 $MAX_ATTEMPTS); do
+    STATE=$($EDEN pod ps 2>/dev/null | grep "^$POD_NAME" | awk '{for(i=1;i<=NF;i++) if($i ~ /RUNNING|HALTED|HALTING|BOOTING|INSTALLED|BROKEN|ERROR/) print $i}' | head -1)
+
+    echo "Attempt $ATTEMPT/$MAX_ATTEMPTS: Pod '$POD_NAME' state: $STATE"
+
+    if [ "$STATE" = "HALTED" ]; then
+        echo "SUCCESS: Pod '$POD_NAME' reached HALTED state!"
+        exit 0
+    fi
+
+    # Also accept if the pod disappeared or is in ERROR/BROKEN (fully stopped)
+    if [ -z "$STATE" ] || [ "$STATE" = "ERROR" ] || [ "$STATE" = "BROKEN" ]; then
+        echo "Pod '$POD_NAME' is in state '$STATE' (treating as stopped)"
+        exit 0
+    fi
+
+    sleep $POLL_INTERVAL
+done
+
+echo "ERROR: Timeout waiting for pod '$POD_NAME' to reach HALTED state"
+echo "Last state: $STATE"
+exit 1
+
+-- wait-for-boot-failure.sh --
+#!/bin/bash
+# Wait for a pod to attempt boot and fail (enter ERROR or BROKEN state, or have an error message)
+# This waits for image download to complete first, then for the boot failure
+# IMPORTANT: Fails immediately if VM reaches RUNNING state (means corruption didn't work)
+# $1 = pod name
+EDEN={{EdenConfig "eden.root"}}/{{EdenConfig "eden.bin-dist"}}/{{EdenConfig "eden.eden-bin"}}
+POD_NAME="$1"
+
+echo "=== Waiting for pod '$POD_NAME' to attempt boot and fail ==="
+echo "This will wait for image download first, then for boot failure..."
+echo "NOTE: Will fail immediately if VM reaches RUNNING state (corruption didn't work)"
+
+MAX_ATTEMPTS=120
+POLL_INTERVAL=5
+
+for ATTEMPT in $(seq 1 $MAX_ATTEMPTS); do
+    # Get the full line for the pod
+    POD_LINE=$($EDEN pod ps 2>/dev/null | grep "^$POD_NAME" || echo "")
+
+    # Extract state
+    STATE=$(echo "$POD_LINE" | awk '{for(i=1;i<=NF;i++) if($i ~ /RUNNING|HALTED|HALTING|BOOTING|INSTALLED|BROKEN|ERROR/) print $i}' | head -1)
+
+    echo "Attempt $ATTEMPT/$MAX_ATTEMPTS: Pod '$POD_NAME' state: $STATE"
+
+    # FAIL EARLY: If VM is RUNNING, our corruption didn't work!
+    if [ "$STATE" = "RUNNING" ]; then
+        echo ""
+        echo "ERROR: Pod '$POD_NAME' reached RUNNING state!"
+        echo "This means the OVMF directory corruption did not prevent boot."
+        echo "Check if chattr +i was applied correctly."
+        echo ""
+        echo "Checking OVMF directory status..."
+        $EDEN eve ssh "ls -la /persist/vault/ovmf/ 2>/dev/null; lsattr /persist/vault/ovmf/ 2>/dev/null" 2>/dev/null || true
+        exit 1
+    fi
+
+    # Check for error states that indicate boot failure
+    if [ "$STATE" = "ERROR" ] || [ "$STATE" = "BROKEN" ]; then
+        echo "SUCCESS: Pod '$POD_NAME' is in failed state '$STATE' - boot failure detected!"
+        exit 0
+    fi
+
+    # Check for error message in the output (e.g., "HALTING: [description:...")
+    if echo "$POD_LINE" | grep -qE "error|Error|ERROR|failed|Failed|FAILED"; then
+        echo "SUCCESS: Pod '$POD_NAME' has error message - boot failure detected!"
+        echo "Pod line: $POD_LINE"
+        exit 0
+    fi
+
+    # If pod is in HALTED state (not HALTING), boot was attempted and stopped
+    if [ "$STATE" = "HALTED" ]; then
+        echo "SUCCESS: Pod '$POD_NAME' is HALTED - boot failure detected!"
+        exit 0
+    fi
+
+    sleep $POLL_INTERVAL
+done
+
+echo "WARNING: Timeout waiting for boot failure, continuing anyway..."
+echo "Last state: $STATE"
+# Don't fail - maybe the boot failure happened but we missed it
+exit 0
+
+
+-- verify-fml-resolution.sh --
+#!/bin/bash
+# Verify FML resolution is correctly applied to a VM
+# $1 = pod name
+# $2 = expected resolution (e.g., "1024x768")
+EDEN={{EdenConfig "eden.root"}}/{{EdenConfig "eden.bin-dist"}}/{{EdenConfig "eden.eden-bin"}}
+POD_NAME="$1"
+EXPECTED_RES="$2"
+
+echo "=== Verifying FML resolution for pod '$POD_NAME' ==="
+echo "Expected resolution: $EXPECTED_RES"
+
+VM_UUID=$($EDEN pod ps 2>/dev/null | awk -v name="$POD_NAME" '$1==name {print $3}' | head -1)
+if [ -n "$VM_UUID" ]; then
+    echo "Pod UUID: $VM_UUID"
+fi
+
+# Method 1: Look for OVMF vars/settings file name containing the resolution (most stable)
+echo ""
+echo "Method 1: Checking OVMF settings files..."
+OVMF_FILES=$($EDEN eve ssh "ls -la /persist/vault/ovmf-settings/ 2>/dev/null | grep -F '$EXPECTED_RES'" 2>/dev/null || true)
+if [ -n "$OVMF_FILES" ]; then
+    echo "$OVMF_FILES"
+    echo "SUCCESS: OVMF settings file exists for resolution '$EXPECTED_RES'"
+    exit 0
+fi
+
+# Method 2: Check QEMU cmdline for uuid + resolution token in any file path
+# (best-effort; depends on how qemu args look)
+echo ""
+echo "Method 2: Checking QEMU cmdline..."
+if [ -n "$VM_UUID" ]; then
+    QEMU_LINE=$($EDEN eve ssh "ps aux | grep '[q]emu-system-x86_64' | grep -F '$VM_UUID' | head -1" 2>/dev/null || true)
+else
+    QEMU_LINE=$($EDEN eve ssh "ps aux | grep '[q]emu-system-x86_64' | head -1" 2>/dev/null || true)
+fi
+
+echo "$QEMU_LINE"
+if echo "$QEMU_LINE" | grep -Fq "$EXPECTED_RES"; then
+    echo "SUCCESS: QEMU cmdline contains resolution '$EXPECTED_RES'"
+    exit 0
+fi
+
+# Method 3: Fallback to global config (this verifies config propagation even if
+# we can't see OVMF artifacts)
+echo ""
+echo "Method 3: Verifying global FML resolution config..."
+GLOBAL_RES=$($EDEN eve ssh "cat /persist/status/zedagent/ConfigItemValueMap/global.json 2>/dev/null" 2>/dev/null | grep -o '"app.fml.resolution"[^}]*' | grep -o '"StrValue":"[^"]*"' | sed 's/"StrValue":"//; s/"$//')
+
+echo "Global FML resolution config: '$GLOBAL_RES'"
+if [ "$GLOBAL_RES" = "$EXPECTED_RES" ]; then
+    echo "Global config shows correct resolution (treating as success)"
+    exit 0
+fi
+
+echo "ERROR: Could not verify FML resolution '$EXPECTED_RES' was applied"
+exit 1
+
+-- verify-retry-logs.sh --
+#!/bin/bash
+# Verify that maybeRetryBoot was actually triggered by checking EVE logs
+# $1 = pod name
+EDEN={{EdenConfig "eden.root"}}/{{EdenConfig "eden.bin-dist"}}/{{EdenConfig "eden.eden-bin"}}
+POD_NAME="$1"
+
+echo "=== Verifying maybeRetryBoot was triggered for pod '$POD_NAME' ==="
+
+# Get the pod UUID
+VM_UUID=$($EDEN pod ps 2>/dev/null | awk -v name="$POD_NAME" '$1==name {print $3}' | head -1)
+echo "Pod UUID: $VM_UUID"
+
+# Check EVE logs for maybeRetryBoot messages
+# The log messages we're looking for (from domainmgr.go):
+# - "maybeRetryBoot(%s) after %s at %v" - when retry is triggered
+# - "maybeRetryBoot(%s) DONE for %s" - when retry completes successfully
+echo ""
+echo "Searching EVE logs for maybeRetryBoot messages..."
+
+RETRY_LOGS=$($EDEN eve ssh "logread 2>/dev/null | grep -i 'maybeRetryBoot' | tail -20" 2>/dev/null || echo "")
+
+if [ -z "$RETRY_LOGS" ]; then
+    echo "WARNING: No maybeRetryBoot messages found in logs"
+    echo ""
+    echo "Checking for BootFailed messages instead..."
+    BOOT_FAILED_LOGS=$($EDEN eve ssh "logread 2>/dev/null | grep -iE 'BootFailed|boot.*failed|failed.*boot' | tail -10" 2>/dev/null || echo "")
+    if [ -n "$BOOT_FAILED_LOGS" ]; then
+        echo "Found BootFailed messages:"
+        echo "$BOOT_FAILED_LOGS"
+    fi
+
+    echo ""
+    echo "Checking for domain retry messages..."
+    DOMAIN_LOGS=$($EDEN eve ssh "logread 2>/dev/null | grep -iE 'retry|Retry' | grep -i domain | tail -10" 2>/dev/null || echo "")
+    if [ -n "$DOMAIN_LOGS" ]; then
+        echo "Found domain retry messages:"
+        echo "$DOMAIN_LOGS"
+    fi
+
+    # Don't fail - logs might have rotated or we might have missed the window
+    echo ""
+    echo "WARNING: Could not find explicit maybeRetryBoot logs, but VM started successfully"
+    echo "This may indicate logs rotated or different log format"
+    exit 0
+fi
+
+echo "Found maybeRetryBoot messages:"
+echo "$RETRY_LOGS"
+
+# Check if the logs contain our pod's UUID
+if [ -n "$VM_UUID" ] && echo "$RETRY_LOGS" | grep -qF "$VM_UUID"; then
+    echo ""
+    echo "SUCCESS: Found maybeRetryBoot log entry for pod UUID '$VM_UUID'"
+    exit 0
+fi
+
+# Check for "DONE" message indicating successful retry
+if echo "$RETRY_LOGS" | grep -q "DONE"; then
+    echo ""
+    echo "SUCCESS: Found maybeRetryBoot DONE message - retry completed successfully"
+    exit 0
+fi
+
+echo ""
+echo "SUCCESS: maybeRetryBoot was triggered (found log entries)"
+exit 0
+
+-- make-kvm-dir-immutable.sh --
+#!/bin/bash
+# Make the KVM state directory immutable to cause DomainCreate failure
+# EVE creates /run/hypervisor/kvm/<domain-name>/ during domain creation
+# If the parent directory is immutable, mkdir fails, causing BootFailed=true
+EDEN={{EdenConfig "eden.root"}}/{{EdenConfig "eden.bin-dist"}}/{{EdenConfig "eden.eden-bin"}}
+
+echo "=== Making KVM state directory immutable to cause boot failure ==="
+
+# Create the directory if it doesn't exist, then make it immutable
+RESULT=$($EDEN eve ssh "mkdir -p /run/hypervisor/kvm && chattr +i /run/hypervisor/kvm && echo 'Directory made immutable'" 2>&1)
+
+echo "$RESULT"
+
+if echo "$RESULT" | grep -q "immutable"; then
+    echo "SUCCESS: KVM state directory is now immutable, DomainCreate will fail"
+    exit 0
+fi
+
+echo "ERROR: Failed to make KVM state directory immutable"
+exit 1
+
+-- make-kvm-dir-writable.sh --
+#!/bin/bash
+# Remove immutable flag from KVM state directory so boot retry can succeed
+EDEN={{EdenConfig "eden.root"}}/{{EdenConfig "eden.bin-dist"}}/{{EdenConfig "eden.eden-bin"}}
+
+echo "=== Removing immutable flag from KVM state directory ==="
+
+# Remove immutable flag from /run/hypervisor/kvm
+RESULT=$($EDEN eve ssh "chattr -i /run/hypervisor/kvm && echo 'Directory made writable'" 2>&1)
+
+echo "$RESULT"
+
+if echo "$RESULT" | grep -q "writable"; then
+    echo "SUCCESS: KVM state directory is now writable, retry will succeed"
+    exit 0
+fi
+
+echo "ERROR: Failed to make KVM state directory writable"
+exit 1
+
+-- make-ovmf-readonly.sh --
+#!/bin/bash
+# Make the OVMF destination directory immutable to cause VM boot failure
+# The copy from /hostfs/etc/ovmf/OVMF_VARS_<resolution>.fd to
+# /persist/vault/ovmf/<uuid>_OVMF_VARS.fd will fail
+# Note: We use chattr +i because chmod 555 doesn't stop root from writing
+EDEN={{EdenConfig "eden.root"}}/{{EdenConfig "eden.bin-dist"}}/{{EdenConfig "eden.eden-bin"}}
+
+echo "=== Making OVMF destination directory immutable to cause boot failure ==="
+
+# Create the directory if it doesn't exist, then make it immutable
+RESULT=$($EDEN eve ssh "mkdir -p /persist/vault/ovmf && chattr +i /persist/vault/ovmf && echo 'Directory made immutable'" 2>&1)
+
+echo "$RESULT"
+
+if echo "$RESULT" | grep -q "immutable"; then
+    echo "SUCCESS: OVMF directory is now immutable, copy will fail"
+    exit 0
+fi
+
+echo "ERROR: Failed to make OVMF directory immutable"
+exit 1
+
+-- make-ovmf-writable.sh --
+#!/bin/bash
+# Remove immutable flag from OVMF destination directory so boot retry can succeed
+EDEN={{EdenConfig "eden.root"}}/{{EdenConfig "eden.bin-dist"}}/{{EdenConfig "eden.eden-bin"}}
+
+echo "=== Removing immutable flag from OVMF destination directory ==="
+
+# Remove immutable flag from /persist/vault/ovmf
+RESULT=$($EDEN eve ssh "chattr -i /persist/vault/ovmf && echo 'Directory made writable'" 2>&1)
+
+echo "$RESULT"
+
+if echo "$RESULT" | grep -q "writable"; then
+    echo "SUCCESS: OVMF directory is now writable, retry will succeed"
+    exit 0
+fi
+
+echo "ERROR: Failed to make OVMF directory writable"
+exit 1

@@ -24,6 +24,11 @@
 [!exec:bash] stop
 [!exec:sleep] stop
 
+# Set debug level to info to capture qmpEventHandler info-level messages
+# The success indicator "Event channel closed for socket" is logged at INFO level
+# Default remote log level is "warning" which would filter out INFO messages
+eden controller edge-node update --config debug.default.remote.loglevel=info
+
 # Cleanup from any previous interrupted test run
 message 'Cleaning up any leftover resources from previous runs'
 exec -t 2m bash cleanup-previous.sh {{$app_name}} {{$network_name}}
@@ -52,6 +57,9 @@ test eden.app.test -test.v -timewait 10m - {{$app_name}}
 
 eden network delete {{$network_name}}
 test eden.network.test -test.v -timewait 10m - {{$network_name}}
+
+# Restore default log level
+eden controller edge-node update --config debug.default.remote.loglevel=warning
 
 -- eden-config.yml --
 {{/* Test's config file */}}

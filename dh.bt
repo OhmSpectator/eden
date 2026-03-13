@@ -1,0 +1,45 @@
+#!/bin/bash
+
+HOST=index.docker.io
+
+# Get all IPv4 addresses
+IPS=$(dig +short $HOST | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$')
+
+# Convert to little-endian hex for bpftrace
+HEX_IPS=""
+for ip in $IPS; do
+    IFS=. read -r a b c d <<< "$ip"
+    HEX=$(printf "0x%02x%02x%02x%02x" $d $c $b $a)
+    HEX_IPS="$HEX_IPS $HEX"
+done
+
+# Generate the bpftrace filter condition
+COND=""
+for hex in $HEX_IPS; do
+    [ -z "$COND" ] && COND="\$daddr == $hex" || COND="$COND || \$daddr == $hex"
+done
+
+# Create the bpftrace script
+cat > /tmp/track-docker.bt <<EOF
+kprobe:tcp_v4_connect
+{
+    \$sk = (struct sock *)arg0;
+    \$daddr = \$sk->__sk_common.skc_daddr;
+    if ($COND) {
+        printf("PID: %d CMD: %s DST: %d.%d.%d.%d\\n",
+            pid, comm,
+            (\$daddr & 0xff),
+            (\$daddr >> 8) & 0xff,
+            (\$daddr >> 16) & 0xff,
+            (\$daddr >> 24) & 0xff
+        );
+    }
+}
+EOF
+
+# Run bpftrace
+sudo bpftrace /tmp/track-docker.bt
+
+# Clean up
+rm /tmp/track-docker.bt
+

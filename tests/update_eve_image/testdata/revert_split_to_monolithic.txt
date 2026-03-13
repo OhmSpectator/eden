@@ -1,0 +1,62 @@
+# Test: Rollback from split-rootfs to monolithic EVE
+# This test verifies that after reverting to a monolithic image:
+# - The device boots successfully with all services in the monolithic rootfs
+# - No Extension is expected or loaded (extsloader does not exist in old code)
+# - Orphaned ext-img*.img files on persist are harmless
+
+# Obtain eve.tag from config (the original monolithic version)
+{{$eve_ver := EdenConfig "eve.tag"}}
+
+# Obtain eve.hv from config
+{{$eve_hv := EdenConfig "eve.hv"}}
+
+# Obtain eve.arch from config
+{{$eve_arch := EdenConfig "eve.arch"}}
+
+# Combine variables into $short_version
+{{$short_version := printf "%s-%s-%s" $eve_ver $eve_hv $eve_arch}}
+
+# Use eden.lim.test for access Infos with timewait 30m
+{{$test := "test eden.lim.test -test.v -timewait 30m -test.run TestInfo"}}
+
+# Decrease update testing time
+eden controller edge-node update --config timer.test.baseimage.update=30
+
+# Download the original monolithic EVE rootfs
+message 'EVE monolithic image download for rollback'
+eden -t 10m utils download eve-rootfs --eve-tag={{$eve_ver}} --eve-hv={{$eve_hv}} --downloader-dist={{EdenConfigPath "eve.dist"}} -v debug
+
+# Send command to update back to monolithic image
+message 'EVE rollback to monolithic request'
+eden -t 10m controller edge-node eveimage-update file://{{EdenConfigPath "eve.dist"}}/rootfs-{{ $short_version }}.squashfs
+
+# Check stderr, it must be empty
+! stderr .
+
+# Wait for inprogress state
+message 'Waiting for EVE rollback starting...'
+{{$test}} -out InfoContent.dinfo.SwList[0].ShortVersion 'InfoContent.dinfo.SwList[0].PartitionState:inprogress'
+
+# Wait for active state
+message 'Waiting for EVE rollback completing...'
+{{$test}} -out InfoContent.dinfo.SwList[0].ShortVersion 'InfoContent.dinfo.SwList[0].PartitionState:active'
+
+eden -t 1m info --out InfoContent.dinfo.SwList[0].ShortVersion 'InfoContent.dinfo.SwList[0].PartitionState:active' --tail=1
+
+# Verify the device is back on monolithic (no ext-verity-roothash)
+message 'Verifying monolithic state...'
+eden eve ssh 'test -f /etc/ext-verity-roothash && echo split || echo monolithic'
+stdout 'monolithic'
+
+# Reset EVE config
+eden eve reset
+
+# Test's config file
+-- eden-config.yml --
+test:
+    controller: adam://{{EdenConfig "adam.ip"}}:{{EdenConfig "adam.port"}}
+    eve:
+      {{EdenConfig "eve.name"}}:
+        onboard-cert: {{EdenConfigPath "eve.cert"}}
+        serial: "{{EdenConfig "eve.serial"}}"
+        model: {{EdenConfig "eve.devmodel"}}

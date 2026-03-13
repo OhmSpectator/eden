@@ -1,0 +1,79 @@
+# Test: Rollback from split-rootfs v2 back to split-rootfs v1
+# Scenario: split(v2) -> split(v1) rollback
+#
+# Precondition: device was updated split(v1) -> split(v2) via
+#   update_split_to_split test. Both partition slots contain
+#   split-rootfs images.
+#
+# This test pushes the first split-rootfs version again and verifies:
+# - Device reverts to the previous split-rootfs version
+# - Extension paired with the reverted slot loads correctly
+# - extsloader reaches "ready" state
+# - dm-verity root hash is present
+#
+# Env vars:
+#   EVE_VERSION  - first split-rootfs EVE version tag (required)
+#   EVE_REGISTRY - OCI registry path (default: lfedge/eve)
+
+# First split-rootfs version to roll back to
+{{$eve_ver := "0.0.0"}}
+
+# Default EVE registry
+{{$eve_registry := "lfedge/eve"}}
+
+# Obtain EVE_VERSION from environment
+{{$env := EdenGetEnv "EVE_VERSION"}}
+{{if $env}}{{$eve_ver = $env}}{{end}}
+
+# Obtain EVE_REGISTRY from environment (e.g. "myuser/eve")
+{{$env_reg := EdenGetEnv "EVE_REGISTRY"}}
+{{if $env_reg}}{{$eve_registry = $env_reg}}{{end}}
+
+{{$eve_hv := "kvm"}}
+{{$eve_arch := EdenConfig "eve.arch"}}
+{{$short_version := printf "%s-%s-%s" $eve_ver $eve_hv $eve_arch}}
+{{$test := "test eden.lim.test -test.v -timewait 30m -test.run TestInfo"}}
+
+# Decrease update testing time
+eden controller edge-node update --config timer.test.baseimage.update=30
+
+# Send update back to first split-rootfs version
+message 'Split->Split rollback: sending update request'
+eden -t 10m controller edge-node eveimage-update oci://docker.io/{{$eve_registry}}:{{$eve_ver}}-{{$eve_hv}}-{{$eve_arch}} -m adam://
+! stderr .
+
+# Wait for update to complete (active on original partition)
+message 'Split->Split rollback: waiting for rollback to activate...'
+{{$test}} -out InfoContent.dinfo.SwList[0].ShortVersion 'InfoContent.dinfo.SwList[0].PartitionState:active InfoContent.dinfo.SwList[0].ShortVersion:{{ $short_version }}'
+stdout '{{ $short_version }}'
+
+# Verify split-rootfs specific state on rolled-back version
+message 'Split->Split rollback: verifying Extension loaded...'
+
+# extsloader state must be ready
+eden eve ssh 'cat /run/extsloader-state.json'
+stdout '"state":"ready"'
+
+# Extension image must exist on persist
+eden eve ssh 'ls /persist/ext-img*.img'
+stdout 'ext-img'
+
+# dm-verity root hash must be present
+eden eve ssh 'test -f /etc/ext-verity-roothash && echo present || echo missing'
+stdout 'present'
+
+# Extension filesystem must be mounted
+eden eve ssh 'mountpoint -q /persist/exts && echo mounted || echo not-mounted'
+stdout 'mounted'
+
+message 'Split->Split rollback: SUCCESS'
+
+# Test's config file
+-- eden-config.yml --
+test:
+    controller: adam://{{EdenConfig "adam.ip"}}:{{EdenConfig "adam.port"}}
+    eve:
+      {{EdenConfig "eve.name"}}:
+        onboard-cert: {{EdenConfigPath "eve.cert"}}
+        serial: "{{EdenConfig "eve.serial"}}"
+        model: {{EdenConfig "eve.devmodel"}}

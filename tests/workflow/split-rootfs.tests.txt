@@ -1,0 +1,42 @@
+# Split Rootfs Test Workflow
+# Tests all upgrade/rollback paths involving split-rootfs EVE images.
+#
+# Scenarios (executed in order):
+#   1. monolith -> split  (forward upgrade, CAS self-heal)
+#   2. split -> monolith  (rollback to monolithic image)
+#   3. monolith -> split  (re-upgrade back to split, setup for split->split)
+#   4. split -> split     (update to a second split version)
+#   5. split -> split     (rollback to first split version)
+#
+# Prerequisites:
+#   - EVE running (monolithic) via eden setup/start
+#   - Split-rootfs EVE OCI images published (make eve-split)
+#   - EVE_VERSION  set to the first  split-rootfs build version
+#   - EVE_VERSION_2 set to the second split-rootfs build version
+#
+# Usage from EVE repo:
+#   EVE_VERSION=<v1> EVE_VERSION_2=<v2> ./eden test ./tests/workflow -s split-rootfs.tests.txt
+
+# Number of tests
+{{$tests := 5}}
+
+{{$devmodel := EdenConfig "eve.devmodel"}}
+
+{{if or (eq $devmodel "ZedVirtual-4G") (eq $devmodel "VBox") (eq $devmodel "parallels") }}
+eden+ports.sh 2223:2223 2224:2224 5912:5902 5911:5901 8027:8027 8028:8028 8029:8029 8030:8030 8031:8031
+{{end}}
+
+/bin/echo Split rootfs: monolith to split upgrade (1/{{$tests}})
+eden.escript.test -testdata ../update_eve_image/testdata/ -test.run TestEdenScripts/update_eve_image_split
+
+/bin/echo Split rootfs: split to monolith rollback (2/{{$tests}})
+eden.escript.test -testdata ../update_eve_image/testdata/ -test.run TestEdenScripts/revert_split_to_monolithic
+
+/bin/echo Split rootfs: monolith to split re-upgrade (3/{{$tests}})
+eden.escript.test -testdata ../update_eve_image/testdata/ -test.run TestEdenScripts/update_eve_image_split
+
+/bin/echo Split rootfs: split to split update (4/{{$tests}})
+eden.escript.test -testdata ../update_eve_image/testdata/ -test.run TestEdenScripts/update_split_to_split
+
+/bin/echo Split rootfs: split to split rollback (5/{{$tests}})
+eden.escript.test -testdata ../update_eve_image/testdata/ -test.run TestEdenScripts/revert_split_to_split

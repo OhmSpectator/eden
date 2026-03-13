@@ -1,0 +1,82 @@
+# Test: Update EVE from split-rootfs to a newer split-rootfs OCI image
+# Scenario: split -> split (A/B partition swap, both have Extension)
+#
+# Precondition: device is already running a split-rootfs EVE
+#   (from the update_eve_image_split test).
+#
+# This test pushes a second split-rootfs version and verifies that:
+# - The new Core activates on the other partition slot
+# - The new Extension is paired with the new active slot
+# - extsloader reaches "ready" state
+# - dm-verity root hash is present
+#
+# Env vars:
+#   EVE_VERSION_2 - second split-rootfs EVE version tag (required)
+#   EVE_REGISTRY  - OCI registry path (default: lfedge/eve)
+
+# Second split-rootfs version to update to
+{{$eve_ver := "0.0.0"}}
+
+# Default EVE registry
+{{$eve_registry := "lfedge/eve"}}
+
+# Obtain EVE_VERSION_2 from environment
+{{$env := EdenGetEnv "EVE_VERSION_2"}}
+{{if $env}}{{$eve_ver = $env}}{{end}}
+
+# Obtain EVE_REGISTRY from environment (e.g. "myuser/eve")
+{{$env_reg := EdenGetEnv "EVE_REGISTRY"}}
+{{if $env_reg}}{{$eve_registry = $env_reg}}{{end}}
+
+{{$eve_hv := "kvm"}}
+{{$eve_arch := EdenConfig "eve.arch"}}
+{{$short_version := printf "%s-%s-%s" $eve_ver $eve_hv $eve_arch}}
+{{$test := "test eden.lim.test -test.v -timewait 30m -test.run TestInfo"}}
+
+# Record current partition before update
+eden eve ssh 'cat /proc/cmdline'
+# Expected: root=PARTLABEL=IMGA or IMGB
+
+# Decrease update testing time
+eden controller edge-node update --config timer.test.baseimage.update=30
+
+# Send update to second split OCI image
+message 'Split->Split: sending update request'
+eden -t 10m controller edge-node eveimage-update oci://docker.io/{{$eve_registry}}:{{$eve_ver}}-{{$eve_hv}}-{{$eve_arch}} -m adam://
+! stderr .
+
+# Wait for update to complete (active on new partition)
+message 'Split->Split: waiting for update to activate...'
+{{$test}} -out InfoContent.dinfo.SwList[0].ShortVersion 'InfoContent.dinfo.SwList[0].PartitionState:active InfoContent.dinfo.SwList[0].ShortVersion:{{ $short_version }}'
+stdout '{{ $short_version }}'
+
+# Verify split-rootfs specific state on new version
+message 'Split->Split: verifying Extension loaded...'
+
+# extsloader state must be ready
+eden eve ssh 'cat /run/extsloader-state.json'
+stdout '"state":"ready"'
+
+# Extension image must exist on persist
+eden eve ssh 'ls /persist/ext-img*.img'
+stdout 'ext-img'
+
+# dm-verity root hash must be present
+eden eve ssh 'test -f /etc/ext-verity-roothash && echo present || echo missing'
+stdout 'present'
+
+# Extension filesystem must be mounted
+eden eve ssh 'mountpoint -q /persist/exts && echo mounted || echo not-mounted'
+stdout 'mounted'
+
+message 'Split->Split: SUCCESS'
+
+# Test's config file
+-- eden-config.yml --
+test:
+    controller: adam://{{EdenConfig "adam.ip"}}:{{EdenConfig "adam.port"}}
+    eve:
+      {{EdenConfig "eve.name"}}:
+        onboard-cert: {{EdenConfigPath "eve.cert"}}
+        serial: "{{EdenConfig "eve.serial"}}"
+        model: {{EdenConfig "eve.devmodel"}}

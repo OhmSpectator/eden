@@ -1,8 +1,13 @@
 # Test: Rollback from split-rootfs to monolithic EVE
-# This test verifies that after reverting to a monolithic image:
+# Scenario: split -> monolith (revert to the original monolithic image)
+#
+# After reverting to a monolithic image:
 # - The device boots successfully with all services in the monolithic rootfs
-# - No Extension is expected or loaded (extsloader does not exist in old code)
+# - No Extension is expected (no ext-verity-roothash in monolithic image)
 # - Orphaned ext-img*.img files on persist are harmless
+#
+# Env vars:
+#   EVE_REGISTRY - OCI registry path (default: lfedge/eve)
 
 # Obtain eve.tag from config (the original monolithic version)
 {{$eve_ver := EdenConfig "eve.tag"}}
@@ -17,36 +22,45 @@
 {{$short_version := printf "%s-%s-%s" $eve_ver $eve_hv $eve_arch}}
 
 # Use eden.lim.test for access Infos with timewait 30m
-{{$test := "test eden.lim.test -test.v -timewait 30m -test.run TestInfo"}}
+{{$test_info := "test eden.lim.test -test.v -timewait 30m -test.run TestInfo"}}
 
-# Decrease update testing time
+# ── Step 1: Verify currently on split image ─────────────────
+message 'Split->Monolith: verifying split state before rollback...'
+eden eve ssh 'test -f /hostfs/etc/ext-verity-roothash && echo split || echo monolithic'
+stdout 'split'
+
+# ── Step 2: Rollback to monolithic image ─────────────────────
 eden controller edge-node update --config timer.test.baseimage.update=30
 
 # Download the original monolithic EVE rootfs
-message 'EVE monolithic image download for rollback'
+message 'Split->Monolith: downloading monolithic image...'
 eden -t 10m utils download eve-rootfs --eve-tag={{$eve_ver}} --eve-hv={{$eve_hv}} --downloader-dist={{EdenConfigPath "eve.dist"}} -v debug
 
 # Send command to update back to monolithic image
-message 'EVE rollback to monolithic request'
+message 'Split->Monolith: sending rollback request...'
 eden -t 10m controller edge-node eveimage-update file://{{EdenConfigPath "eve.dist"}}/rootfs-{{ $short_version }}.squashfs
-
-# Check stderr, it must be empty
 ! stderr .
 
-# Wait for inprogress state
-message 'Waiting for EVE rollback starting...'
-{{$test}} -out InfoContent.dinfo.SwList[0].ShortVersion 'InfoContent.dinfo.SwList[0].PartitionState:inprogress'
+# ── Step 3: Wait for rollback to complete ────────────────────
+message 'Split->Monolith: waiting for rollback to activate...'
+{{$test_info}} -out InfoContent.dinfo.SwList[0].ShortVersion 'InfoContent.dinfo.SwList[0].PartitionState:active InfoContent.dinfo.SwList[0].ShortVersion:{{ $short_version }}'
 
-# Wait for active state
-message 'Waiting for EVE rollback completing...'
-{{$test}} -out InfoContent.dinfo.SwList[0].ShortVersion 'InfoContent.dinfo.SwList[0].PartitionState:active'
+# ── Step 4: Wait for SSH (monolithic has debug in rootfs) ────
+message 'Split->Monolith: waiting for SSH...'
+exec -t 5m bash wait-ssh.sh
 
-eden -t 1m info --out InfoContent.dinfo.SwList[0].ShortVersion 'InfoContent.dinfo.SwList[0].PartitionState:active' --tail=1
+# ── Step 5: Verify monolithic state ──────────────────────────
+message 'Split->Monolith: verifying monolithic state...'
 
-# Verify the device is back on monolithic (no ext-verity-roothash)
-message 'Verifying monolithic state...'
-eden eve ssh 'test -f /etc/ext-verity-roothash && echo split || echo monolithic'
+# Monolithic image must NOT have ext-verity-roothash
+eden eve ssh 'test -f /hostfs/etc/ext-verity-roothash && echo split || echo monolithic'
 stdout 'monolithic'
+
+# Device should be functional
+eden eve ssh 'echo alive'
+stdout 'alive'
+
+message 'Split->Monolith: SUCCESS - rolled back to monolithic image'
 
 # Reset EVE config
 eden eve reset
@@ -60,3 +74,16 @@ test:
         onboard-cert: {{EdenConfigPath "eve.cert"}}
         serial: "{{EdenConfig "eve.serial"}}"
         model: {{EdenConfig "eve.devmodel"}}
+
+-- wait-ssh.sh --
+EDEN={{EdenConfig "eden.root"}}/{{EdenConfig "eden.bin-dist"}}/{{EdenConfig "eden.eden-bin"}}
+i=0
+while [ $i -lt 30 ]; do
+    if timeout 10 $EDEN eve ssh echo ssh-ready 2>/dev/null; then
+        exit 0
+    fi
+    sleep 5
+    i=$((i + 1))
+done
+echo "SSH not available after 150s"
+exit 1

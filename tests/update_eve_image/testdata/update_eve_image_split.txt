@@ -1,11 +1,14 @@
 # Test: Update EVE from monolithic to split-rootfs OCI image
 # Scenario: monolith -> split (forward upgrade with CAS self-heal)
 #
-# The split OCI image contains two layers:
+# The split OCI image contains two layers in a single ContentTree:
 #   disk-root (Core squashfs) + disk-additional (Extension erofs)
 #
-# On a monolithic EVE, WriteToPartition silently skips disk-additional.
-# After reboot, extsloader self-heals by extracting Extension from CAS.
+# After OTA, the stock WriteToPartition writes disk-root to the target
+# partition. The Extension (disk-additional) remains in CAS.
+# After reboot, extsloader detects /etc/ext-verity-roothash in Core,
+# extracts the Extension from CAS via Puller.Pull, mounts it with
+# dm-verity, and starts Extension services (debug, vector, wwan, etc).
 #
 # Env vars:
 #   EVE_VERSION  - split-rootfs EVE version tag (required)
@@ -28,42 +31,56 @@
 {{$eve_hv := "kvm"}}
 {{$eve_arch := EdenConfig "eve.arch"}}
 {{$short_version := printf "%s-%s-%s" $eve_ver $eve_hv $eve_arch}}
-{{$test := "test eden.lim.test -test.v -timewait 30m -test.run TestInfo"}}
+{{$test_info := "test eden.lim.test -test.v -timewait 30m -test.run TestInfo"}}
 {{$devmodel := EdenConfig "eve.devmodel"}}
 
+# ── Step 1: Verify monolithic base ──────────────────────────
+# Monolithic image should NOT have ext-verity-roothash
+message 'Monolith->Split: verifying monolithic base...'
+eden eve ssh 'test -f /hostfs/etc/ext-verity-roothash && echo split || echo monolithic'
+stdout 'monolithic'
+
+# ── Step 2: Send OTA update to split image ──────────────────
 # Decrease update testing time
 eden controller edge-node update --config timer.test.baseimage.update=30
 
-# Send update to split OCI image
 message 'Monolith->Split: sending update request'
 eden -t 10m controller edge-node eveimage-update oci://docker.io/{{$eve_registry}}:{{$eve_ver}}-{{$eve_hv}}-{{$eve_arch}} -m adam://
 ! stderr .
 
-# Wait for update to complete (active on new partition)
+# ── Step 3: Wait for activation on new partition ────────────
 message 'Monolith->Split: waiting for update to activate...'
-{{$test}} -out InfoContent.dinfo.SwList[0].ShortVersion 'InfoContent.dinfo.SwList[0].PartitionState:active InfoContent.dinfo.SwList[0].ShortVersion:{{ $short_version }}'
+{{$test_info}} -out InfoContent.dinfo.SwList[0].ShortVersion 'InfoContent.dinfo.SwList[0].PartitionState:active InfoContent.dinfo.SwList[0].ShortVersion:{{ $short_version }}'
 stdout '{{ $short_version }}'
 
-# Verify split-rootfs specific state
-message 'Monolith->Split: verifying Extension loaded...'
+# ── Step 4: Wait for Extension services (SSH from debug container) ──
+# After reboot, extsloader extracts Extension from CAS, mounts it via
+# dm-verity, and starts services. The debug container (SSH) is in the
+# Extension. Retry SSH until it becomes available.
+message 'Monolith->Split: waiting for Extension services (SSH)...'
+exec -t 5m bash wait-ssh.sh
 
-# extsloader state must be ready
-eden eve ssh 'cat /run/extsloader-state.json'
-stdout '"state":"ready"'
+# ── Step 5: Verify split-rootfs state ───────────────────────
+# Wait for extsloader to reach "ready" (CAS extraction + mount may still
+# be in progress even after SSH is available). Then verify all state.
+message 'Monolith->Split: waiting for extsloader ready state...'
+exec -t 5m bash wait-extsloader.sh
+
+message 'Monolith->Split: verifying Extension loaded via CAS self-heal...'
+
+# dm-verity root hash must be embedded in Core
+eden eve ssh 'test -f /hostfs/etc/ext-verity-roothash && echo present || echo missing'
+stdout 'present'
 
 # Extension image must exist on persist (paired with active slot)
 eden eve ssh 'ls /persist/ext-img*.img'
 stdout 'ext-img'
 
-# dm-verity root hash must be embedded in Core
-eden eve ssh 'test -f /etc/ext-verity-roothash && echo present || echo missing'
-stdout 'present'
-
 # Extension filesystem must be mounted
 eden eve ssh 'mountpoint -q /persist/exts && echo mounted || echo not-mounted'
 stdout 'mounted'
 
-message 'Monolith->Split: SUCCESS'
+message 'Monolith->Split: SUCCESS - CAS self-heal worked, Extension mounted and services running'
 
 # Test's config file
 -- eden-config.yml --
@@ -74,3 +91,33 @@ test:
         onboard-cert: {{EdenConfigPath "eve.cert"}}
         serial: "{{EdenConfig "eve.serial"}}"
         model: {{EdenConfig "eve.devmodel"}}
+
+-- wait-ssh.sh --
+EDEN={{EdenConfig "eden.root"}}/{{EdenConfig "eden.bin-dist"}}/{{EdenConfig "eden.eden-bin"}}
+i=0
+while [ $i -lt 30 ]; do
+    if timeout 10 $EDEN eve ssh echo ssh-ready 2>/dev/null; then
+        exit 0
+    fi
+    sleep 5
+    i=$((i + 1))
+done
+echo "SSH not available after 150s"
+exit 1
+
+-- wait-extsloader.sh --
+EDEN={{EdenConfig "eden.root"}}/{{EdenConfig "eden.bin-dist"}}/{{EdenConfig "eden.eden-bin"}}
+i=0
+while [ $i -lt 24 ]; do
+    STATE=$($EDEN eve ssh 'cat /run/extsloader-state.json 2>/dev/null' 2>/dev/null)
+    if echo "$STATE" | grep -q '"state":"ready"'; then
+        echo "$STATE"
+        exit 0
+    fi
+    echo "Waiting for extsloader ready (attempt $((i+1))/24)... current: $STATE"
+    sleep 10
+    i=$((i + 1))
+done
+echo "extsloader not ready after 240s"
+echo "Last state: $STATE"
+exit 1

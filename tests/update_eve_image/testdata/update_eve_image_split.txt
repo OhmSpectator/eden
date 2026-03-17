@@ -80,7 +80,11 @@ stdout 'ext-img'
 eden eve ssh 'mountpoint -q /persist/exts && echo mounted || echo not-mounted'
 stdout 'mounted'
 
-message 'Monolith->Split: SUCCESS - CAS self-heal worked, Extension mounted and services running'
+# dm-verity mapper device must exist (proves Extension mounted via verity, not legacy loop)
+eden eve ssh 'ls /dev/mapper/exts-verity-* 2>/dev/null && echo verity-active || echo no-verity'
+stdout 'verity-active'
+
+message 'Monolith->Split: SUCCESS - CAS self-heal worked, Extension mounted via dm-verity'
 
 # Test's config file
 -- eden-config.yml --

@@ -97,17 +97,18 @@ exit 1
 
 -- wait-extsloader.sh --
 EDEN={{EdenConfig "eden.root"}}/{{EdenConfig "eden.bin-dist"}}/{{EdenConfig "eden.eden-bin"}}
+# Wait for Extension to be mounted (the real proof extsloader succeeded).
+# Check the mount point directly rather than reading state files.
 i=0
 while [ $i -lt 24 ]; do
-    STATE=$($EDEN eve ssh 'cat /run/extsloader-state.json 2>/dev/null' 2>/dev/null)
-    if echo "$STATE" | grep -q '"state":"ready"'; then
-        echo "$STATE"
+    MOUNTED=$($EDEN eve ssh 'mountpoint -q /persist/exts && echo yes || echo no' 2>/dev/null)
+    if [ "$MOUNTED" = "yes" ]; then
+        echo "Extension mounted at /persist/exts"
         exit 0
     fi
-    echo "Waiting for extsloader ready (attempt $((i+1))/24)... current: $STATE"
+    echo "Waiting for Extension mount (attempt $((i+1))/24)..."
     sleep 10
     i=$((i + 1))
 done
-echo "extsloader not ready after 240s"
-echo "Last state: $STATE"
+echo "Extension not mounted after 240s"
 exit 1

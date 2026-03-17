@@ -1,0 +1,103 @@
+# Test: Automatic rollback from broken split-rootfs image
+# Scenario: monolith -> broken-split -> automatic rollback to monolith
+#
+# This test sends an OTA to a split image where the Extension is corrupted
+# (random bytes instead of real erofs). The Core boots fine and connects to
+# the controller, but extsloader fails dm-verity verification. nodeagent's
+# testing window detects Extension not ready and does NOT mark TestComplete.
+# After the testing window expires, the device reboots and falls back to
+# the previous monolithic partition.
+#
+# Env vars:
+#   EVE_VERSION  - broken split-rootfs version tag (required, with -broken-ext suffix)
+#   EVE_REGISTRY - OCI registry path (default: lfedge/eve)
+
+{{$eve_ver := "0.0.0"}}
+{{$eve_registry := "lfedge/eve"}}
+
+{{$env := EdenGetEnv "EVE_VERSION"}}
+{{if $env}}{{$eve_ver = $env}}{{end}}
+
+{{$env_reg := EdenGetEnv "EVE_REGISTRY"}}
+{{if $env_reg}}{{$eve_registry = $env_reg}}{{end}}
+
+{{$eve_hv := "kvm"}}
+{{$eve_arch := EdenConfig "eve.arch"}}
+{{$short_version := printf "%s-%s-%s" $eve_ver $eve_hv $eve_arch}}
+{{$test_info := "test eden.lim.test -test.v -timewait 30m -test.run TestInfo"}}
+
+# Obtain the monolithic version we expect to roll back to
+{{$mono_ver := EdenConfig "eve.tag"}}
+{{$mono_hv := EdenConfig "eve.hv"}}
+{{$mono_short := printf "%s-%s-%s" $mono_ver $mono_hv $eve_arch}}
+
+# ── Step 1: Verify monolithic base ──────────────────────────
+message 'Rollback: verifying monolithic base...'
+eden eve ssh 'test -f /hostfs/etc/ext-verity-roothash && echo split || echo monolithic'
+stdout 'monolithic'
+
+# ── Step 2: Send OTA to broken split image ──────────────────
+# Set short testing window so rollback happens faster
+eden controller edge-node update --config timer.test.baseimage.update=120
+
+message 'Rollback: sending broken split image update...'
+eden -t 10m controller edge-node eveimage-update oci://docker.io/{{$eve_registry}}:{{$eve_ver}}-{{$eve_hv}}-{{$eve_arch}} -m adam://
+! stderr .
+
+# ── Step 3: Wait for broken image to boot (inprogress) ──────
+# EVE will download, write Core to partition, reboot. Core boots fine
+# but enters "inprogress" (testing) state — never reaches "active"
+# because Extension fails dm-verity and nodeagent blocks TestComplete.
+message 'Rollback: waiting for broken split image to boot (inprogress)...'
+{{$test_info}} -out InfoContent.dinfo.SwList[0].ShortVersion 'InfoContent.dinfo.SwList[0].PartitionState:inprogress InfoContent.dinfo.SwList[0].ShortVersion:{{ $short_version }}'
+stdout '{{ $short_version }}'
+
+# ── Step 4: Wait for automatic rollback ─────────────────────
+# nodeagent sees /etc/ext-verity-roothash (Extension expected) but
+# extsloader can't mount (dm-verity fails on corrupted Extension).
+# nodeagent triggers reboot after testing window (120s) expires →
+# device falls back to previous monolithic partition.
+#
+# We wait for the monolithic version to become active again.
+message 'Rollback: waiting for automatic rollback to monolithic...'
+{{$test_info}} -out InfoContent.dinfo.SwList[0].ShortVersion 'InfoContent.dinfo.SwList[0].PartitionState:active InfoContent.dinfo.SwList[0].ShortVersion:{{ $mono_short }}'
+stdout '{{ $mono_short }}'
+
+# ── Step 5: Wait for SSH and verify monolithic ───────────────
+message 'Rollback: waiting for SSH after rollback...'
+exec -t 5m bash wait-ssh.sh
+
+message 'Rollback: verifying rolled back to monolithic...'
+eden eve ssh 'test -f /hostfs/etc/ext-verity-roothash && echo split || echo monolithic'
+stdout 'monolithic'
+
+eden eve ssh 'echo alive'
+stdout 'alive'
+
+message 'Rollback: SUCCESS - automatic rollback from broken split to monolithic worked'
+
+# Reset config
+eden eve reset
+
+# Test's config file
+-- eden-config.yml --
+test:
+    controller: adam://{{EdenConfig "adam.ip"}}:{{EdenConfig "adam.port"}}
+    eve:
+      {{EdenConfig "eve.name"}}:
+        onboard-cert: {{EdenConfigPath "eve.cert"}}
+        serial: "{{EdenConfig "eve.serial"}}"
+        model: {{EdenConfig "eve.devmodel"}}
+
+-- wait-ssh.sh --
+EDEN={{EdenConfig "eden.root"}}/{{EdenConfig "eden.bin-dist"}}/{{EdenConfig "eden.eden-bin"}}
+i=0
+while [ $i -lt 30 ]; do
+    if timeout 10 $EDEN eve ssh echo ssh-ready 2>/dev/null; then
+        exit 0
+    fi
+    sleep 5
+    i=$((i + 1))
+done
+echo "SSH not available after 150s"
+exit 1

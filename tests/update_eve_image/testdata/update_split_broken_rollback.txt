@@ -74,7 +74,12 @@ stdout 'monolithic'
 eden eve ssh 'echo alive'
 stdout 'alive'
 
-message 'Rollback: SUCCESS - automatic rollback from broken split to monolithic worked'
+# Extension from the failed split partition should be cleaned up
+# (nodeagent cleans current slot's Extension before triggering rollback reboot)
+eden eve ssh 'count=$(ls /persist/ext-img*.img 2>/dev/null | wc -l); echo "ext-img-count:$count"'
+stdout 'ext-img-count:0'
+
+message 'Rollback: SUCCESS - automatic rollback, Extension cleaned up'
 
 # Reset config
 eden eve reset

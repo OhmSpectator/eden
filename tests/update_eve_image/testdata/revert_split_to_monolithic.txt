@@ -60,7 +60,12 @@ stdout 'monolithic'
 eden eve ssh 'echo alive'
 stdout 'alive'
 
-message 'Split->Monolith: SUCCESS - rolled back to monolithic image'
+# Extension from the previous split partition should be cleaned up
+# (baseosmgr cleans when marking the other partition unused)
+eden eve ssh 'count=$(ls /persist/ext-img*.img 2>/dev/null | wc -l); echo "ext-img-count:$count"'
+stdout 'ext-img-count:0'
+
+message 'Split->Monolith: SUCCESS - rolled back to monolithic image, Extension cleaned up'
 
 # Reset EVE config
 eden eve reset

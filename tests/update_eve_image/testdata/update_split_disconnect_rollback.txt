@@ -1,0 +1,169 @@
+# Test: Rollback from split-rootfs when controller connectivity is lost
+# Scenario: monolith -> split (fully working) -> controller disconnect -> rollback
+#
+# This test verifies that Extension cleanup (unmount, verity close, file delete)
+# works correctly when rollback is triggered while Extension is fully loaded
+# and services are running. The rollback is caused by controller disconnect
+# (Adam stopped), not by Extension failure.
+#
+# Flow:
+#   1. Start on monolithic 15.11.0
+#   2. OTA to good split image
+#   3. Wait for Extension to fully load (services running, SSH available)
+#   4. Stop Adam controller container
+#   5. EVE detects controller unreachable → fallback timeout → reboot
+#   6. EVE rolls back to monolithic 15.11.0
+#   7. Restart Adam, verify rollback, verify Extension cleaned up
+#
+# Env vars:
+#   EVE_VERSION  - split-rootfs EVE version tag (required)
+#   EVE_REGISTRY - OCI registry path (default: lfedge/eve)
+
+{{$eve_ver := "0.0.0"}}
+{{$eve_registry := "lfedge/eve"}}
+
+{{$env := EdenGetEnv "EVE_VERSION"}}
+{{if $env}}{{$eve_ver = $env}}{{end}}
+
+{{$env_reg := EdenGetEnv "EVE_REGISTRY"}}
+{{if $env_reg}}{{$eve_registry = $env_reg}}{{end}}
+
+{{$eve_hv := "kvm"}}
+{{$eve_arch := EdenConfig "eve.arch"}}
+{{$short_version := printf "%s-%s-%s" $eve_ver $eve_hv $eve_arch}}
+{{$test_info := "test eden.lim.test -test.v -timewait 30m -test.run TestInfo"}}
+
+# Obtain the monolithic version we expect to roll back to
+{{$mono_ver := EdenConfig "eve.tag"}}
+{{$mono_hv := EdenConfig "eve.hv"}}
+{{$mono_short := printf "%s-%s-%s" $mono_ver $mono_hv $eve_arch}}
+
+# ── Step 1: Verify monolithic base ──────────────────────────
+message 'Disconnect-Rollback: verifying monolithic base...'
+eden eve ssh 'test -f /hostfs/etc/ext-verity-roothash && echo split || echo monolithic'
+stdout 'monolithic'
+
+# ── Step 2: Send OTA to good split image ─────────────────────
+# Set short fallback-on-disconnect timeout (60s instead of default 300s)
+eden controller edge-node update --config timer.test.baseimage.update=600
+eden controller edge-node update --config timer.update.fallback.no.network=60
+
+message 'Disconnect-Rollback: sending split image update...'
+eden -t 10m controller edge-node eveimage-update oci://docker.io/{{$eve_registry}}:{{$eve_ver}}-{{$eve_hv}}-{{$eve_arch}} -m adam://
+! stderr .
+
+# ── Step 3: Wait for split to boot (inprogress) and Extension to load ──
+# We wait for inprogress (not active) because we'll disconnect Adam before
+# the testing window completes, so the update never reaches active state.
+message 'Disconnect-Rollback: waiting for split image to boot (inprogress)...'
+{{$test_info}} -out InfoContent.dinfo.SwList[0].ShortVersion 'InfoContent.dinfo.SwList[0].PartitionState:inprogress InfoContent.dinfo.SwList[0].ShortVersion:{{ $short_version }}'
+stdout '{{ $short_version }}'
+
+message 'Disconnect-Rollback: waiting for Extension services (SSH)...'
+exec -t 5m bash wait-ssh.sh
+
+message 'Disconnect-Rollback: waiting for Extension mount...'
+exec -t 5m bash wait-extsloader.sh
+
+# Verify Extension is fully working before we disconnect
+eden eve ssh 'mountpoint -q /persist/exts && echo mounted || echo not-mounted'
+stdout 'mounted'
+
+eden eve ssh 'ls /dev/mapper/exts-verity-* 2>/dev/null && echo verity-active || echo no-verity'
+stdout 'verity-active'
+
+message 'Disconnect-Rollback: Extension fully loaded, services running'
+
+# ── Step 4: Stop Adam controller ─────────────────────────────
+# This makes EVE lose controller connectivity. After 60s (our configured
+# fallback timeout), nodeagent will trigger a rollback reboot.
+# Before rebooting, it cleans up Extension (lazy unmount + delete).
+message 'Disconnect-Rollback: stopping Adam controller...'
+exec bash stop-adam.sh
+
+# ── Step 5: Wait for rollback to monolithic ──────────────────
+# EVE will detect controller unreachable → 60s fallback timeout →
+# cleanup Extension → reboot → fall back to monolithic.
+# We need Adam running to see the info messages, so restart it
+# after a delay that gives EVE time to reboot.
+message 'Disconnect-Rollback: waiting for fallback reboot (90s)...'
+exec sleep 90
+
+message 'Disconnect-Rollback: restarting Adam controller...'
+exec bash start-adam.sh
+
+message 'Disconnect-Rollback: waiting for monolithic to become active...'
+{{$test_info}} -out InfoContent.dinfo.SwList[0].ShortVersion 'InfoContent.dinfo.SwList[0].PartitionState:active InfoContent.dinfo.SwList[0].ShortVersion:{{ $mono_short }}'
+stdout '{{ $mono_short }}'
+
+# ── Step 6: Wait for SSH and verify ──────────────────────────
+message 'Disconnect-Rollback: waiting for SSH...'
+exec -t 5m bash wait-ssh.sh
+
+message 'Disconnect-Rollback: verifying rollback state...'
+
+eden eve ssh 'test -f /hostfs/etc/ext-verity-roothash && echo split || echo monolithic'
+stdout 'monolithic'
+
+eden eve ssh 'echo alive'
+stdout 'alive'
+
+# Extension from split partition should be cleaned up before rollback
+eden eve ssh 'count=$(ls /persist/ext-img*.img 2>/dev/null | wc -l); echo "ext-img-count:$count"'
+stdout 'ext-img-count:0'
+
+message 'Disconnect-Rollback: SUCCESS - rollback with running services, Extension cleaned up'
+
+# Reset config
+eden eve reset
+
+# Test's config file
+-- eden-config.yml --
+test:
+    controller: adam://{{EdenConfig "adam.ip"}}:{{EdenConfig "adam.port"}}
+    eve:
+      {{EdenConfig "eve.name"}}:
+        onboard-cert: {{EdenConfigPath "eve.cert"}}
+        serial: "{{EdenConfig "eve.serial"}}"
+        model: {{EdenConfig "eve.devmodel"}}
+
+-- wait-ssh.sh --
+EDEN={{EdenConfig "eden.root"}}/{{EdenConfig "eden.bin-dist"}}/{{EdenConfig "eden.eden-bin"}}
+i=0
+while [ $i -lt 30 ]; do
+    if timeout 10 $EDEN eve ssh echo ssh-ready 2>/dev/null; then
+        exit 0
+    fi
+    sleep 5
+    i=$((i + 1))
+done
+echo "SSH not available after 150s"
+exit 1
+
+-- wait-extsloader.sh --
+EDEN={{EdenConfig "eden.root"}}/{{EdenConfig "eden.bin-dist"}}/{{EdenConfig "eden.eden-bin"}}
+i=0
+while [ $i -lt 24 ]; do
+    MOUNTED=$($EDEN eve ssh 'mountpoint -q /persist/exts && echo yes || echo no' 2>/dev/null)
+    if [ "$MOUNTED" = "yes" ]; then
+        echo "Extension mounted at /persist/exts"
+        exit 0
+    fi
+    echo "Waiting for Extension mount (attempt $((i+1))/24)..."
+    sleep 10
+    i=$((i + 1))
+done
+echo "Extension not mounted after 240s"
+exit 1
+
+-- stop-adam.sh --
+echo "Stopping Adam controller container..."
+docker stop eden_adam
+echo "Adam stopped"
+
+-- start-adam.sh --
+echo "Starting Adam controller container..."
+docker start eden_adam
+# Wait for Adam to be ready
+sleep 5
+echo "Adam started"

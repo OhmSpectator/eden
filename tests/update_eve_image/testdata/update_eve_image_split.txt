@@ -42,7 +42,7 @@ stdout 'monolithic'
 
 # ── Step 2: Send OTA update to split image ──────────────────
 # Decrease update testing time
-eden controller edge-node update --config timer.test.baseimage.update=30
+eden controller edge-node update --config timer.test.baseimage.update=300
 
 message 'Monolith->Split: sending update request'
 eden -t 10m controller edge-node eveimage-update oci://docker.io/{{$eve_registry}}:{{$eve_ver}}-{{$eve_hv}}-{{$eve_arch}} -m adam://

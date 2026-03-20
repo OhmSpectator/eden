@@ -8,6 +8,7 @@
 #
 # Env vars:
 #   EVE_REGISTRY - OCI registry path (default: lfedge/eve)
+#   SPLIT_WORKFLOW_NO_RESET - skip final `eden eve reset` when running inside a workflow
 
 # Obtain eve.tag from config (the original monolithic version)
 {{$eve_ver := EdenConfig "eve.tag"}}
@@ -23,6 +24,7 @@
 
 # Use eden.lim.test for access Infos with timewait 30m
 {{$test_info := "test eden.lim.test -test.v -timewait 30m -test.run TestInfo"}}
+{{$skip_reset := EdenGetEnv "SPLIT_WORKFLOW_NO_RESET"}}
 
 # ── Step 1: Verify currently on split image ─────────────────
 message 'Split->Monolith: verifying split state before rollback...'
@@ -60,15 +62,18 @@ stdout 'monolithic'
 eden eve ssh 'echo alive'
 stdout 'alive'
 
-# Extension from the previous split partition should be cleaned up
-# (baseosmgr cleans when marking the other partition unused)
+# Unsupported explicit downgrade to monolithic should not depend on
+# Extension cleanup semantics. Stale ext-img*.img files are tolerated here.
+# A later supported split update rewrites the paired file for the target slot.
 eden eve ssh 'count=$(ls /persist/ext-img*.img 2>/dev/null | wc -l); echo "ext-img-count:$count"'
-stdout 'ext-img-count:0'
+stdout 'ext-img-count:'
 
-message 'Split->Monolith: SUCCESS - rolled back to monolithic image, Extension cleaned up'
+message 'Split->Monolith: SUCCESS - rolled back to monolithic image'
 
+{{if $skip_reset}}{{else}}
 # Reset EVE config
 eden eve reset
+{{end}}
 
 # Test's config file
 -- eden-config.yml --

@@ -1,0 +1,98 @@
+# Test: Retry update EVE from monolithic to split-rootfs OCI image
+# Scenario: monolith -> failed split(v1) rollback -> retry same split(v1)
+#
+# This is used only for the split-rootfs full workflow after the Adam-loss
+# rollback case. A plain eveimage-update of the same version is blocked by
+# baseosmgr, which treats it as the same failed update still present on the
+# other partition. The proper operation here is eveimage-update-retry.
+#
+# Env vars:
+#   EVE_VERSION  - split-rootfs EVE version tag (required)
+#   EVE_REGISTRY - OCI registry path (default: lfedge/eve)
+
+{{$eve_ver := "0.0.0"}}
+{{$eve_registry := "lfedge/eve"}}
+
+{{$env := EdenGetEnv "EVE_VERSION"}}
+{{if $env}}{{$eve_ver = $env}}{{end}}
+
+{{$env_reg := EdenGetEnv "EVE_REGISTRY"}}
+{{if $env_reg}}{{$eve_registry = $env_reg}}{{end}}
+
+{{$eve_hv := "kvm"}}
+{{$eve_arch := EdenConfig "eve.arch"}}
+{{$short_version := printf "%s-%s-%s" $eve_ver $eve_hv $eve_arch}}
+{{$test_info := "test eden.lim.test -test.v -timewait 30m -test.run TestInfo"}}
+
+# ── Step 1: Verify monolithic base after rollback ────────────
+message 'Monolith->Split-Retry: verifying monolithic base...'
+eden eve ssh 'test -f /hostfs/etc/ext-verity-roothash && echo split || echo monolithic'
+stdout 'monolithic'
+
+# ── Step 2: Retry the previously failed split update ─────────
+eden controller edge-node update --config timer.test.baseimage.update=300
+
+message 'Monolith->Split-Retry: retrying split image update...'
+eden -t 10m controller edge-node eveimage-update-retry
+! stderr .
+
+# ── Step 3: Wait for activation on new partition ─────────────
+message 'Monolith->Split-Retry: waiting for update to activate...'
+{{$test_info}} -out InfoContent.dinfo.SwList[0].ShortVersion 'InfoContent.dinfo.SwList[0].PartitionState:active InfoContent.dinfo.SwList[0].ShortVersion:{{ $short_version }}'
+stdout '{{ $short_version }}'
+
+# ── Step 4: Wait for Extension services (SSH) ────────────────
+message 'Monolith->Split-Retry: waiting for Extension services (SSH)...'
+exec -t 5m bash wait-ssh.sh
+
+# ── Step 5: Verify split-rootfs state ────────────────────────
+message 'Monolith->Split-Retry: waiting for extsloader ready state...'
+exec -t 5m bash wait-extsloader.sh
+
+message 'Monolith->Split-Retry: verifying Extension loaded after retry...'
+
+eden eve ssh 'test -f /hostfs/etc/ext-verity-roothash && echo present || echo missing'
+stdout 'present'
+
+eden eve ssh 'ls /persist/ext-img*.img'
+stdout 'ext-img'
+
+eden eve ssh 'mountpoint -q /persist/exts && echo mounted || echo not-mounted'
+stdout 'mounted'
+
+eden eve ssh 'ls /dev/mapper/exts-verity-* 2>/dev/null && echo verity-active || echo no-verity'
+stdout 'verity-active'
+
+eden eve ssh 'count=$(ls /persist/ext-img*.img 2>/dev/null | wc -l); echo "ext-img-count:$count"'
+stdout 'ext-img-count:1'
+
+message 'Monolith->Split-Retry: SUCCESS - retry worked, Extension mounted via dm-verity'
+
+-- wait-ssh.sh --
+EDEN={{EdenConfig "eden.root"}}/{{EdenConfig "eden.bin-dist"}}/{{EdenConfig "eden.eden-bin"}}
+i=0
+while [ $i -lt 30 ]; do
+    if timeout 10 $EDEN eve ssh echo ssh-ready 2>/dev/null; then
+        exit 0
+    fi
+    sleep 5
+    i=$((i + 1))
+done
+echo "SSH not available after 150s"
+exit 1
+
+-- wait-extsloader.sh --
+EDEN={{EdenConfig "eden.root"}}/{{EdenConfig "eden.bin-dist"}}/{{EdenConfig "eden.eden-bin"}}
+i=0
+while [ $i -lt 24 ]; do
+    MOUNTED=$($EDEN eve ssh 'mountpoint -q /persist/exts && echo yes || echo no' 2>/dev/null)
+    if [ "$MOUNTED" = "yes" ]; then
+        echo "Extension mounted at /persist/exts"
+        exit 0
+    fi
+    echo "Waiting for Extension mount (attempt $((i+1))/24)..."
+    sleep 10
+    i=$((i + 1))
+done
+echo "Extension not mounted after 240s"
+exit 1

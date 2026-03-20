@@ -1,0 +1,136 @@
+# Test: Automatic rollback from broken split-rootfs v2 back to split-rootfs v1
+# Scenario: split(v1) -> broken-split(v2) -> automatic rollback to split(v1)
+#
+# Precondition: device is already running a good split-rootfs EVE v1
+#   (for example after update_eve_image_split).
+#
+# This test sends an OTA to a split image where the ext-verity-roothash
+# embedded in Core is corrupted. The Core boots on the other slot and
+# connects to the controller, but extsloader fails dm-verity verification
+# for the Extension. nodeagent keeps the slot in testing and then falls
+# back to the previous split slot when the test window expires.
+#
+# Env vars:
+#   EVE_VERSION         - current good split-rootfs v1 tag (required)
+#   EVE_VERSION_BROKEN  - broken split-rootfs v2 tag (preferred)
+#   EVE_VERSION_2_BROKEN - broken split-rootfs v2 tag (legacy fallback)
+#   EVE_VERSION_2       - broken split-rootfs v2 tag (fallback)
+#   EVE_REGISTRY        - OCI registry path (default: lfedge/eve)
+
+{{$rollback_ver := "0.0.0"}}
+{{$target_ver := "0.0.0"}}
+{{$eve_registry := "lfedge/eve"}}
+
+{{$env_v1 := EdenGetEnv "EVE_VERSION"}}
+{{if $env_v1}}{{$rollback_ver = $env_v1}}{{end}}
+
+{{$env_v2 := EdenGetEnv "EVE_VERSION_2"}}
+{{if $env_v2}}{{$target_ver = $env_v2}}{{end}}
+
+{{$env_broken := EdenGetEnv "EVE_VERSION_BROKEN"}}
+{{if $env_broken}}{{$target_ver = $env_broken}}{{end}}
+
+{{$env_v2_broken := EdenGetEnv "EVE_VERSION_2_BROKEN"}}
+{{if $env_v2_broken}}{{$target_ver = $env_v2_broken}}{{end}}
+
+{{$env_reg := EdenGetEnv "EVE_REGISTRY"}}
+{{if $env_reg}}{{$eve_registry = $env_reg}}{{end}}
+
+{{$eve_hv := "kvm"}}
+{{$eve_arch := EdenConfig "eve.arch"}}
+{{$rollback_short := printf "%s-%s-%s" $rollback_ver $eve_hv $eve_arch}}
+{{$target_short := printf "%s-%s-%s" $target_ver $eve_hv $eve_arch}}
+{{$test_info := "test eden.lim.test -test.v -timewait 30m -test.run TestInfo"}}
+
+# ── Step 1: Verify current split state ───────────────────────
+message 'Split->Broken-Split rollback: verifying current split state...'
+eden eve ssh 'test -f /hostfs/etc/ext-verity-roothash && echo split || echo monolithic'
+stdout 'split'
+
+message 'Split->Broken-Split rollback: waiting for current Extension mount...'
+exec -t 5m bash wait-extsloader.sh
+
+# ── Step 2: Send OTA to broken split image ───────────────────
+# Keep the window short so the automatic rollback happens quickly once
+# extsloader cannot validate the Extension.
+eden controller edge-node update --config timer.test.baseimage.update=120
+
+message 'Split->Broken-Split rollback: sending broken split update...'
+eden -t 10m controller edge-node eveimage-update oci://docker.io/{{$eve_registry}}:{{$target_ver}}-{{$eve_hv}}-{{$eve_arch}} -m adam://
+! stderr .
+
+# ── Step 3: Wait for broken split boot (inprogress) ──────────
+# The Core boots on the other slot, but the Extension never becomes ready.
+message 'Split->Broken-Split rollback: waiting for broken split image to boot (inprogress)...'
+{{$test_info}} -out InfoContent.dinfo.SwList[0].ShortVersion 'InfoContent.dinfo.SwList[0].PartitionState:inprogress InfoContent.dinfo.SwList[0].ShortVersion:{{ $target_short }}'
+stdout '{{ $target_short }}'
+
+# ── Step 4: Wait for automatic rollback to split v1 ──────────
+message 'Split->Broken-Split rollback: waiting for automatic rollback to split v1...'
+{{$test_info}} -out InfoContent.dinfo.SwList[0].ShortVersion 'InfoContent.dinfo.SwList[0].PartitionState:active InfoContent.dinfo.SwList[0].ShortVersion:{{ $rollback_short }}'
+stdout '{{ $rollback_short }}'
+
+# ── Step 5: Wait for SSH and verify split rollback state ─────
+message 'Split->Broken-Split rollback: waiting for SSH after rollback...'
+exec -t 5m bash wait-ssh.sh
+
+message 'Split->Broken-Split rollback: verifying rolled back split state...'
+exec -t 5m bash wait-extsloader.sh
+
+eden eve ssh 'test -f /hostfs/etc/ext-verity-roothash && echo split || echo monolithic'
+stdout 'split'
+
+eden eve ssh 'echo alive'
+stdout 'alive'
+
+# The failed slot Extension should be cleaned up; only the active split slot's
+# Extension should remain after rollback.
+eden eve ssh 'count=$(ls /persist/ext-img*.img 2>/dev/null | wc -l); echo "ext-img-count:$count"'
+stdout 'ext-img-count:1'
+
+eden eve ssh 'mountpoint -q /persist/exts && echo mounted || echo not-mounted'
+stdout 'mounted'
+
+eden eve ssh 'ls /dev/mapper/exts-verity-* 2>/dev/null && echo verity-active || echo no-verity'
+stdout 'verity-active'
+
+message 'Split->Broken-Split rollback: SUCCESS'
+
+# Test's config file
+-- eden-config.yml --
+test:
+    controller: adam://{{EdenConfig "adam.ip"}}:{{EdenConfig "adam.port"}}
+    eve:
+      {{EdenConfig "eve.name"}}:
+        onboard-cert: {{EdenConfigPath "eve.cert"}}
+        serial: "{{EdenConfig "eve.serial"}}"
+        model: {{EdenConfig "eve.devmodel"}}
+
+-- wait-ssh.sh --
+EDEN={{EdenConfig "eden.root"}}/{{EdenConfig "eden.bin-dist"}}/{{EdenConfig "eden.eden-bin"}}
+i=0
+while [ $i -lt 30 ]; do
+    if timeout 10 $EDEN eve ssh echo ssh-ready 2>/dev/null; then
+        exit 0
+    fi
+    sleep 5
+    i=$((i + 1))
+done
+echo "SSH not available after 150s"
+exit 1
+
+-- wait-extsloader.sh --
+EDEN={{EdenConfig "eden.root"}}/{{EdenConfig "eden.bin-dist"}}/{{EdenConfig "eden.eden-bin"}}
+i=0
+while [ $i -lt 24 ]; do
+    MOUNTED=$($EDEN eve ssh 'mountpoint -q /persist/exts && echo yes || echo no' 2>/dev/null)
+    if [ "$MOUNTED" = "yes" ]; then
+        echo "Extension mounted at /persist/exts"
+        exit 0
+    fi
+    echo "Waiting for Extension mount (attempt $((i+1))/24)..."
+    sleep 10
+    i=$((i + 1))
+done
+echo "Extension not mounted after 240s"
+exit 1

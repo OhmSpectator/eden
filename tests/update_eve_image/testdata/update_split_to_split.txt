@@ -40,13 +40,19 @@ stdout 'split'
 exec -t 5m bash wait-extsloader.sh
 
 # ── Step 2: Send update to second split image ────────────────
-eden controller edge-node update --config timer.test.baseimage.update=30
+# Keep the validation window aligned with monolith->split. nodeagent only
+# marks the new slot active after the test window expires and Extension is
+# ready, so 30s is unnecessarily tight.
+eden controller edge-node update --config timer.test.baseimage.update=300
 
 message 'Split->Split: sending update request'
 eden -t 10m controller edge-node eveimage-update oci://docker.io/{{$eve_registry}}:{{$eve_ver}}-{{$eve_hv}}-{{$eve_arch}} -m adam://
 ! stderr .
 
 # ── Step 3: Wait for activation ──────────────────────────────
+# nodeagent marks the new slot active only after the validation window expires
+# and extsloader is ready, so waiting for "active" is still the right success
+# gate even though we verify mount/verity again below.
 message 'Split->Split: waiting for update to activate...'
 {{$test_info}} -out InfoContent.dinfo.SwList[0].ShortVersion 'InfoContent.dinfo.SwList[0].PartitionState:active InfoContent.dinfo.SwList[0].ShortVersion:{{ $short_version }}'
 stdout '{{ $short_version }}'
@@ -66,6 +72,11 @@ stdout 'present'
 
 eden eve ssh 'ls /persist/ext-img*.img'
 stdout 'ext-img'
+
+# After a successful activation, baseosmgr cleans up the now-unused slot's
+# Extension image. Only the active slot's Extension should remain.
+eden eve ssh 'count=$(ls /persist/ext-img*.img 2>/dev/null | wc -l); echo "ext-img-count:$count"'
+stdout 'ext-img-count:1'
 
 eden eve ssh 'mountpoint -q /persist/exts && echo mounted || echo not-mounted'
 stdout 'mounted'

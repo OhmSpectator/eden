@@ -1,129 +1,110 @@
-# Test: Rollback from split-rootfs when controller connectivity is lost
-# Scenario: monolith -> split (fully working) -> controller disconnect -> rollback
+# Test: Rollback from split-rootfs v2 back to split-rootfs v1 when Adam is unreachable
+# Scenario: split(v1) -> split(v2) -> controller disconnect -> rollback to split(v1)
 #
-# This test verifies that Extension cleanup (unmount, verity close, file delete)
-# works correctly when rollback is triggered while Extension is fully loaded
-# and services are running. The rollback is caused by controller disconnect
-# (host-side network drop to Adam), not by Extension failure.
+# Precondition: device is already running a good split-rootfs EVE v1
+#   (for example after update_eve_image_split).
 #
-# Flow:
-#   1. Start on monolithic 15.11.0
-#   2. OTA to good split image
-#   3. Wait for Extension to fully load (services running, SSH available)
-#   4. Drop host-side traffic from EVE to Adam
-#   5. EVE detects controller unreachable → fallback timeout → reboot
-#   6. EVE rolls back to monolithic 15.11.0
-#   7. Remove the host-side drop, verify rollback, verify Extension cleaned up
+# This test verifies rollback when the new split image is otherwise healthy:
+# the new Core activates on the other slot, the new Extension is mounted,
+# services are running, and then host-side traffic from EVE to Adam is
+# dropped. nodeagent detects controller unreachability, the fallback timeout
+# expires, and the device rolls back to the previous good split slot.
 #
 # Env vars:
-#   EVE_VERSION  - split-rootfs EVE version tag (required)
-#   EVE_REGISTRY - OCI registry path (default: lfedge/eve)
-#   SPLIT_WORKFLOW_NO_RESET - skip final `eden eve reset` when running inside a workflow
+#   EVE_VERSION   - current good split-rootfs v1 tag (required)
+#   EVE_VERSION_2 - next good split-rootfs v2 tag (required)
+#   EVE_REGISTRY  - OCI registry path (default: lfedge/eve)
 
-{{$eve_ver := "0.0.0"}}
+{{$rollback_ver := "0.0.0"}}
+{{$target_ver := "0.0.0"}}
 {{$eve_registry := "lfedge/eve"}}
 
-{{$env := EdenGetEnv "EVE_VERSION"}}
-{{if $env}}{{$eve_ver = $env}}{{end}}
+{{$env_v1 := EdenGetEnv "EVE_VERSION"}}
+{{if $env_v1}}{{$rollback_ver = $env_v1}}{{end}}
+
+{{$env_v2 := EdenGetEnv "EVE_VERSION_2"}}
+{{if $env_v2}}{{$target_ver = $env_v2}}{{end}}
 
 {{$env_reg := EdenGetEnv "EVE_REGISTRY"}}
 {{if $env_reg}}{{$eve_registry = $env_reg}}{{end}}
 
 {{$eve_hv := "kvm"}}
 {{$eve_arch := EdenConfig "eve.arch"}}
-{{$short_version := printf "%s-%s-%s" $eve_ver $eve_hv $eve_arch}}
+{{$rollback_short := printf "%s-%s-%s" $rollback_ver $eve_hv $eve_arch}}
+{{$target_short := printf "%s-%s-%s" $target_ver $eve_hv $eve_arch}}
 {{$test_info := "test eden.lim.test -test.v -timewait 30m -test.run TestInfo"}}
-{{$skip_reset := EdenGetEnv "SPLIT_WORKFLOW_NO_RESET"}}
 
-# Obtain the monolithic version we expect to roll back to
-{{$mono_ver := EdenConfig "eve.tag"}}
-{{$mono_hv := EdenConfig "eve.hv"}}
-{{$mono_short := printf "%s-%s-%s" $mono_ver $mono_hv $eve_arch}}
-
-# ── Step 1: Verify monolithic base ──────────────────────────
-message 'Disconnect-Rollback: verifying monolithic base...'
+# ── Step 1: Verify current split state ───────────────────────
+message 'Split->Split disconnect rollback: verifying current split state...'
 eden eve ssh 'test -f /hostfs/etc/ext-verity-roothash && echo split || echo monolithic'
-stdout 'monolithic'
+stdout 'split'
 
-# ── Step 2: Send OTA to good split image ─────────────────────
-# Set short fallback-on-disconnect timeout and controller send timeout so a
-# host-side DROP rule is detected as unavailable quickly.
-message 'Disconnect-Rollback: ensuring no stale host drop is present...'
+message 'Split->Split disconnect rollback: waiting for current Extension mount...'
+exec -t 5m bash wait-extsloader.sh
+
+# ── Step 2: Send OTA to good split v2 ────────────────────────
+message 'Split->Split disconnect rollback: ensuring no stale host drop is present...'
 exec bash cleanup-adam-drop.sh
 
 eden controller edge-node update --config timer.test.baseimage.update=600
 eden controller edge-node update --config timer.update.fallback.no.network=60
 eden controller edge-node update --config timer.send.timeout=10
 
-message 'Disconnect-Rollback: sending split image update...'
-eden -t 10m controller edge-node eveimage-update oci://docker.io/{{$eve_registry}}:{{$eve_ver}}-{{$eve_hv}}-{{$eve_arch}} -m adam://
+message 'Split->Split disconnect rollback: sending split v2 update...'
+eden -t 10m controller edge-node eveimage-update oci://docker.io/{{$eve_registry}}:{{$target_ver}}-{{$eve_hv}}-{{$eve_arch}} -m adam://
 ! stderr .
 
-# ── Step 3: Wait for split to boot (inprogress) and Extension to load ──
-# We wait for inprogress (not active) because we'll disconnect Adam before
-# the testing window completes, so the update never reaches active state.
-message 'Disconnect-Rollback: waiting for split image to boot (inprogress)...'
-{{$test_info}} -out InfoContent.dinfo.SwList[0].ShortVersion 'InfoContent.dinfo.SwList[0].PartitionState:inprogress InfoContent.dinfo.SwList[0].ShortVersion:{{ $short_version }}'
-stdout '{{ $short_version }}'
+# ── Step 3: Wait for split v2 boot (inprogress) and Extension ──
+message 'Split->Split disconnect rollback: waiting for split v2 to boot (inprogress)...'
+{{$test_info}} -out InfoContent.dinfo.SwList[0].ShortVersion 'InfoContent.dinfo.SwList[0].PartitionState:inprogress InfoContent.dinfo.SwList[0].ShortVersion:{{ $target_short }}'
+stdout '{{ $target_short }}'
 
-message 'Disconnect-Rollback: waiting for Extension services (SSH)...'
+message 'Split->Split disconnect rollback: waiting for Extension services (SSH)...'
 exec -t 5m bash wait-ssh.sh
 
-message 'Disconnect-Rollback: waiting for Extension mount...'
+message 'Split->Split disconnect rollback: waiting for Extension mount...'
 exec -t 5m bash wait-extsloader.sh
 
-# Verify Extension is fully working before we disconnect
 eden eve ssh 'mountpoint -q /persist/exts && echo mounted || echo not-mounted'
 stdout 'mounted'
 
 eden eve ssh 'ls /dev/mapper/exts-verity-* 2>/dev/null && echo verity-active || echo no-verity'
 stdout 'verity-active'
 
-message 'Disconnect-Rollback: Extension fully loaded, services running'
+message 'Split->Split disconnect rollback: split v2 is healthy, blocking Adam next...'
 
 # ── Step 4: Block EVE -> Adam on the host ────────────────────
-# Host-side DROP avoids touching the guest while also avoiding ECONNREFUSED
-# from a stopped controller socket. Adam is exposed through a Docker published
-# port, so we block the resolved container endpoint and cover both locally
-# originated traffic (OUTPUT) and forwarded traffic (DOCKER-USER).
-# With timer.send.timeout=10, EVE should treat Adam as unavailable quickly
-# enough for the 60s fallback timer to expire.
-# Before rebooting, nodeagent cleans up Extension (lazy unmount + delete).
-# The helper removes the DROP rule on exit, even if it fails internally.
-message 'Disconnect-Rollback: blocking EVE -> Adam on the host for 150s...'
+message 'Split->Split disconnect rollback: blocking EVE -> Adam on the host for 150s...'
 exec bash disconnect-window.sh 150
 
-# ── Step 5: Wait for rollback to monolithic ──────────────────
-# EVE will detect controller unreachable → 60s fallback timeout →
-# cleanup Extension → reboot → fall back to monolithic.
-# Adam is restored by disconnect-window.sh before we query the final state.
+# ── Step 5: Wait for rollback to split v1 ────────────────────
+message 'Split->Split disconnect rollback: waiting for split v1 to become active again...'
+{{$test_info}} -out InfoContent.dinfo.SwList[0].ShortVersion 'InfoContent.dinfo.SwList[0].PartitionState:active InfoContent.dinfo.SwList[0].ShortVersion:{{ $rollback_short }}'
+stdout '{{ $rollback_short }}'
 
-message 'Disconnect-Rollback: waiting for monolithic to become active...'
-{{$test_info}} -out InfoContent.dinfo.SwList[0].ShortVersion 'InfoContent.dinfo.SwList[0].PartitionState:active InfoContent.dinfo.SwList[0].ShortVersion:{{ $mono_short }}'
-stdout '{{ $mono_short }}'
-
-# ── Step 6: Wait for SSH and verify ──────────────────────────
-message 'Disconnect-Rollback: waiting for SSH...'
+# ── Step 6: Wait for SSH and verify rollback state ───────────
+message 'Split->Split disconnect rollback: waiting for SSH after rollback...'
 exec -t 5m bash wait-ssh.sh
 
-message 'Disconnect-Rollback: verifying rollback state...'
+message 'Split->Split disconnect rollback: verifying rolled back split state...'
+exec -t 5m bash wait-extsloader.sh
 
 eden eve ssh 'test -f /hostfs/etc/ext-verity-roothash && echo split || echo monolithic'
-stdout 'monolithic'
+stdout 'split'
 
 eden eve ssh 'echo alive'
 stdout 'alive'
 
-# Extension from split partition should be cleaned up before rollback
 eden eve ssh 'count=$(ls /persist/ext-img*.img 2>/dev/null | wc -l); echo "ext-img-count:$count"'
-stdout 'ext-img-count:0'
+stdout 'ext-img-count:1'
 
-message 'Disconnect-Rollback: SUCCESS - rollback with running services, Extension cleaned up'
+eden eve ssh 'mountpoint -q /persist/exts && echo mounted || echo not-mounted'
+stdout 'mounted'
 
-{{if $skip_reset}}{{else}}
-# Reset config
-eden eve reset
-{{end}}
+eden eve ssh 'ls /dev/mapper/exts-verity-* 2>/dev/null && echo verity-active || echo no-verity'
+stdout 'verity-active'
+
+message 'Split->Split disconnect rollback: SUCCESS'
 
 # Test's config file
 -- eden-config.yml --
@@ -169,8 +150,8 @@ set -eu
 
 CHAIN=DOCKER-USER
 OUTPUT_CHAIN=OUTPUT
-COMMENT_FWD=eden-update-split-disconnect-fwd
-COMMENT_OUT=eden-update-split-disconnect-out
+COMMENT_FWD=eden-update-split-to-split-disconnect-fwd
+COMMENT_OUT=eden-update-split-to-split-disconnect-out
 ADAM_CONTAINER_IP=$(docker inspect eden_adam | awk -F'"' '/"IPAddress": "[0-9]/{print $4; exit}')
 ADAM_CONTAINER_PORT=8080
 RULE_FWD=(-p tcp -d "$ADAM_CONTAINER_IP" --dport "$ADAM_CONTAINER_PORT" -m comment --comment "$COMMENT_FWD" -j DROP)
@@ -227,8 +208,8 @@ set -eu
 
 CHAIN=DOCKER-USER
 OUTPUT_CHAIN=OUTPUT
-COMMENT_FWD=eden-update-split-disconnect-fwd
-COMMENT_OUT=eden-update-split-disconnect-out
+COMMENT_FWD=eden-update-split-to-split-disconnect-fwd
+COMMENT_OUT=eden-update-split-to-split-disconnect-out
 ADAM_CONTAINER_IP=$(docker inspect eden_adam | awk -F'"' '/"IPAddress": "[0-9]/{print $4; exit}')
 ADAM_CONTAINER_PORT=8080
 RULE_FWD=(-p tcp -d "$ADAM_CONTAINER_IP" --dport "$ADAM_CONTAINER_PORT" -m comment --comment "$COMMENT_FWD" -j DROP)

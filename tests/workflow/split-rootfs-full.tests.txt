@@ -1,0 +1,66 @@
+# Split Rootfs Full Workflow
+# Exercises the full split-rootfs upgrade/rollback matrix from a fresh
+# monolithic base through both monolith->split and split->split paths.
+#
+# Scenarios (executed in order):
+#   1. monolith -> split(v1)                   happy path
+#   2. split(v1) -> monolith                  explicit rollback
+#   3. monolith -> broken split               automatic rollback (hash mismatch)
+#   4. monolith -> split(v1) -> Adam loss     automatic rollback
+#   5. monolith -> split(v1) retry            re-upgrade to prepare split->split
+#   6. split(v1) -> split(v2)                 happy path
+#   7. split(v2) -> split(v1)                 explicit rollback
+#   8. split(v1) -> broken split              automatic rollback (hash mismatch)
+#   9. split(v1) -> split(v2) -> Adam loss    automatic rollback
+#
+# Required env vars:
+#   EVE_VERSION         first good split version (v1)
+#   EVE_VERSION_2       second good split version (v2)
+#   EVE_VERSION_BROKEN  broken split version
+#
+# Usage:
+#   EVE_VERSION=<v1> EVE_VERSION_2=<v2> EVE_VERSION_BROKEN=<broken> \
+#     ./eden test ./tests/workflow -s split-rootfs-full.tests.txt
+
+{{$tests := 9}}
+
+{{$devmodel := EdenConfig "eve.devmodel"}}
+{{$eden_dist_bin := printf "%s/%s" (EdenConfig "eden.root") (EdenConfig "eden.bin-dist")}}
+{{$eden_escript_test := printf "%s/eden.escript.test" $eden_dist_bin}}
+
+{{if or (eq $devmodel "ZedVirtual-4G") (eq $devmodel "VBox") (eq $devmodel "parallels") }}
+eden+ports.sh 2223:2223 2224:2224 5912:5902 5911:5901 8027:8027 8028:8028 8029:8029 8030:8030 8031:8031
+{{end}}
+
+/bin/echo Split rootfs full: checking cached sudo for disconnect tests
+bash split-rootfs-sudo-setup.sh
+
+/bin/echo Split rootfs full: monolith to split upgrade (1/{{$tests}})
+eden.escript.test -testdata ../update_eve_image/testdata/ -test.run ^TestEdenScripts$/^update_eve_image_split$
+
+/bin/echo Split rootfs full: split to monolith rollback (2/{{$tests}})
+env SPLIT_WORKFLOW_NO_RESET=1 {{$eden_escript_test}} -testdata ../update_eve_image/testdata/ -test.run ^TestEdenScripts$/^revert_split_to_monolithic$
+
+/bin/echo Split rootfs full: monolith to broken split rollback (3/{{$tests}})
+env SPLIT_WORKFLOW_NO_RESET=1 {{$eden_escript_test}} -testdata ../update_eve_image/testdata/ -test.run ^TestEdenScripts$/^update_split_broken_rollback$
+
+/bin/echo Split rootfs full: monolith to split disconnect rollback (4/{{$tests}})
+env SPLIT_WORKFLOW_NO_RESET=1 {{$eden_escript_test}} -testdata ../update_eve_image/testdata/ -test.run ^TestEdenScripts$/^update_split_disconnect_rollback$
+
+/bin/echo Split rootfs full: monolith to split retry (5/{{$tests}})
+eden.escript.test -testdata ../update_eve_image/testdata/ -test.run ^TestEdenScripts$/^retry_update_eve_image_split$
+
+/bin/echo Split rootfs full: split to split update (6/{{$tests}})
+eden.escript.test -testdata ../update_eve_image/testdata/ -test.run ^TestEdenScripts$/^update_split_to_split$
+
+/bin/echo Split rootfs full: split to split explicit rollback (7/{{$tests}})
+eden.escript.test -testdata ../update_eve_image/testdata/ -test.run ^TestEdenScripts$/^revert_split_to_split$
+
+/bin/echo Split rootfs full: split to broken split rollback (8/{{$tests}})
+eden.escript.test -testdata ../update_eve_image/testdata/ -test.run ^TestEdenScripts$/^update_split_to_split_broken_rollback$
+
+/bin/echo Split rootfs full: split to split disconnect rollback (9/{{$tests}})
+eden.escript.test -testdata ../update_eve_image/testdata/ -test.run ^TestEdenScripts$/^update_split_to_split_disconnect_rollback$
+
+/bin/echo Split rootfs full: stopping sudo keepalive
+bash split-rootfs-sudo-cleanup.sh

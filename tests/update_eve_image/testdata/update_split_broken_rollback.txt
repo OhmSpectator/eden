@@ -9,14 +9,19 @@
 # the previous monolithic partition.
 #
 # Env vars:
-#   EVE_VERSION  - broken split-rootfs version tag (required, with -broken-ext suffix)
-#   EVE_REGISTRY - OCI registry path (default: lfedge/eve)
+#   EVE_VERSION_BROKEN - broken split-rootfs version tag (preferred)
+#   EVE_VERSION        - broken split-rootfs version tag (fallback)
+#   EVE_REGISTRY       - OCI registry path (default: lfedge/eve)
+#   SPLIT_WORKFLOW_NO_RESET - skip final `eden eve reset` when running inside a workflow
 
 {{$eve_ver := "0.0.0"}}
 {{$eve_registry := "lfedge/eve"}}
 
 {{$env := EdenGetEnv "EVE_VERSION"}}
 {{if $env}}{{$eve_ver = $env}}{{end}}
+
+{{$env_broken := EdenGetEnv "EVE_VERSION_BROKEN"}}
+{{if $env_broken}}{{$eve_ver = $env_broken}}{{end}}
 
 {{$env_reg := EdenGetEnv "EVE_REGISTRY"}}
 {{if $env_reg}}{{$eve_registry = $env_reg}}{{end}}
@@ -25,6 +30,7 @@
 {{$eve_arch := EdenConfig "eve.arch"}}
 {{$short_version := printf "%s-%s-%s" $eve_ver $eve_hv $eve_arch}}
 {{$test_info := "test eden.lim.test -test.v -timewait 30m -test.run TestInfo"}}
+{{$skip_reset := EdenGetEnv "SPLIT_WORKFLOW_NO_RESET"}}
 
 # Obtain the monolithic version we expect to roll back to
 {{$mono_ver := EdenConfig "eve.tag"}}
@@ -81,8 +87,10 @@ stdout 'ext-img-count:0'
 
 message 'Rollback: SUCCESS - automatic rollback, Extension cleaned up'
 
+{{if $skip_reset}}{{else}}
 # Reset config
 eden eve reset
+{{end}}
 
 # Test's config file
 -- eden-config.yml --

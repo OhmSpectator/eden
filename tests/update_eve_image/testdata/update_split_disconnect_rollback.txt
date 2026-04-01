@@ -30,6 +30,8 @@
 {{if $env_reg}}{{$eve_registry = $env_reg}}{{end}}
 
 {{$eve_hv := "kvm"}}
+{{$env_hv := EdenGetEnv "EVE_HV"}}
+{{if $env_hv}}{{$eve_hv = $env_hv}}{{end}}
 {{$eve_arch := EdenConfig "eve.arch"}}
 {{$short_version := printf "%s-%s-%s" $eve_ver $eve_hv $eve_arch}}
 {{$test_info := "test eden.lim.test -test.v -timewait 30m -test.run TestInfo"}}
@@ -117,6 +119,16 @@ stdout 'alive'
 # Extension from split partition should be cleaned up before rollback
 eden eve ssh 'count=$(ls /persist/ext-img*.img 2>/dev/null | wc -l); echo "ext-img-count:$count"'
 stdout 'ext-img-count:0'
+
+# No GRUB HV menu should appear on any boot
+exec bash check-no-grub-menu.sh
+
+# "uni" must never reach runtime — check both the final value and that the
+# safety fallback in onboot.sh was never triggered
+eden eve ssh 'cat /hostfs/run/eve-hv-type 2>/dev/null | grep -qx uni && echo uni-leaked || echo hv-ok'
+stdout 'hv-ok'
+eden eve ssh 'logread | grep -q "eve-hv-type resolved to .uni." && echo uni-safety-triggered || echo clean-resolve'
+stdout 'clean-resolve'
 
 message 'Disconnect-Rollback: SUCCESS - rollback with running services, Extension cleaned up'
 
@@ -266,3 +278,27 @@ done
 
 sleep 5
 echo "Host DROP rule removed"
+
+-- check-no-grub-menu.sh --
+#!/bin/bash
+# Verify that NO boot in the current QEMU session showed the HV selection menu.
+# The serial log uses logappend=on, so it may contain entries from previous runs.
+# We only check from the LAST "swtpm is starting" line (marks current session).
+EVE_LOG={{EdenConfig "eden.root"}}/default-eve.log
+
+if [ ! -f "$EVE_LOG" ]; then
+    echo "ERROR: EVE serial log not found at $EVE_LOG"
+    exit 1
+fi
+
+# Extract current session: everything after the last "swtpm is starting"
+CURRENT=$(tac "$EVE_LOG" | sed '/swtpm is starting/q' | tac)
+
+if echo "$CURRENT" | grep -q "Boot/Install EVE"; then
+    echo "FAIL: GRUB HV selection menu appeared during a boot!"
+    echo "--- GRUB menu lines in current session ---"
+    echo "$CURRENT" | grep -E "Boot/Install|Boot 0\." | head -10
+    exit 1
+fi
+
+echo "OK: No GRUB HV selection menu on any boot in current session"

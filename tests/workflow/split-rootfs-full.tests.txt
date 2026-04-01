@@ -12,6 +12,7 @@
 #   7. split(v2) -> split(v1)                 explicit rollback
 #   8. split(v1) -> broken split              automatic rollback (hash mismatch)
 #   9. split(v1) -> split(v2) -> Adam loss    automatic rollback
+#  10. split(v1) -> split(v2) + PCR enforce  vault lock + rollback (wrong PCR12)
 #
 # Required env vars:
 #   EVE_VERSION         first good split version (v1)
@@ -22,7 +23,7 @@
 #   EVE_VERSION=<v1> EVE_VERSION_2=<v2> EVE_VERSION_BROKEN=<broken> \
 #     ./eden test ./tests/workflow -s split-rootfs-full.tests.txt
 
-{{$tests := 9}}
+{{$tests := 10}}
 
 {{$devmodel := EdenConfig "eve.devmodel"}}
 {{$eden_dist_bin := printf "%s/%s" (EdenConfig "eden.root") (EdenConfig "eden.bin-dist")}}
@@ -61,6 +62,9 @@ eden.escript.test -testdata ../update_eve_image/testdata/ -test.run ^TestEdenScr
 
 /bin/echo Split rootfs full: split to split disconnect rollback (9/{{$tests}})
 eden.escript.test -testdata ../update_eve_image/testdata/ -test.run ^TestEdenScripts$/^update_split_to_split_disconnect_rollback$
+
+/bin/echo Split rootfs full: PCR enforcement vault lock and rollback (10/{{$tests}})
+eden.escript.test -testdata ../update_eve_image/testdata/ -test.run ^TestEdenScripts$/^update_split_pcr_enforcement_rollback$
 
 /bin/echo Split rootfs full: stopping sudo keepalive
 bash split-rootfs-sudo-cleanup.sh

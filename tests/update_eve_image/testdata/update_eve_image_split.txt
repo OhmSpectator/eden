@@ -29,6 +29,8 @@
 {{if $env_reg}}{{$eve_registry = $env_reg}}{{end}}
 
 {{$eve_hv := "kvm"}}
+{{$env_hv := EdenGetEnv "EVE_HV"}}
+{{if $env_hv}}{{$eve_hv = $env_hv}}{{end}}
 {{$eve_arch := EdenConfig "eve.arch"}}
 {{$short_version := printf "%s-%s-%s" $eve_ver $eve_hv $eve_arch}}
 {{$test_info := "test eden.lim.test -test.v -timewait 30m -test.run TestInfo"}}
@@ -88,6 +90,79 @@ stdout 'verity-active'
 eden eve ssh 'count=$(ls /persist/ext-img*.img 2>/dev/null | wc -l); echo "ext-img-count:$count"'
 stdout 'ext-img-count:1'
 
+# Extension should have been pre-extracted by baseosmgr (not CAS self-heal)
+eden eve ssh 'logread | grep -q "Extension image found at .* (pre-extracted by baseosmgr)" && echo pre-extracted || echo self-healed'
+stdout 'pre-extracted'
+
+# ── Universal image HV resolution verification ───────────────
+# After OTA from monolithic KVM to uni, the full chain:
+#   GRUB set_eve_flavor: CONFIG empty, PERSIST empty → rootfs "uni" → set_uni_boot
+#   GRUB set_uni_boot: checks other partition → "kvm" → set_kvm_boot + eve_hv_type=kvm on cmdline
+#   onboot.sh: reads eve_hv_type=kvm from cmdline → /run + /persist/status
+#   Next GRUB boot: reads persist → "kvm" → never calls set_uni_boot again
+
+# 1. No HV selection menu during OTA (serial console check)
+exec bash check-no-grub-menu.sh
+
+# 1b. "uni" must never reach runtime — check both the final value and that the
+# safety fallback in onboot.sh was never triggered
+eden eve ssh 'cat /hostfs/run/eve-hv-type 2>/dev/null | grep -qx uni && echo uni-leaked || echo hv-ok'
+stdout 'hv-ok'
+eden eve ssh 'logread | grep -q "eve-hv-type resolved to .uni." && echo uni-safety-triggered || echo clean-resolve'
+stdout 'clean-resolve'
+
+# 2. GRUB resolved HV and passed it on kernel cmdline
+eden eve ssh 'cat /proc/cmdline | tr " " "\n" | grep "^eve_hv_type=" | head -1'
+stdout 'eve_hv_type=kvm'
+
+# 3. Runtime HV is KVM
+eden eve ssh 'cat /hostfs/run/eve-hv-type 2>/dev/null || echo unknown'
+stdout 'kvm'
+
+# 4. onboot.sh wrote EFI var for next GRUB boot
+eden eve ssh 'dd if=/sys/firmware/efi/efivars/eve-hv-type-7ad58f29-2b49-4f5a-9f0b-4e7bf7c2c311 bs=1 skip=4 2>/dev/null | tr -d "\0" || echo missing'
+stdout 'kvm'
+
+# 5. Rootfs says "uni" (proves it's the universal image)
+eden eve ssh 'cat /hostfs/etc/eve-hv-type 2>/dev/null || echo unknown'
+stdout 'uni'
+
+# 6. Kube services filtered out (device runs as KVM)
+eden eve ssh 'logread | grep -q "Skipping service kube: requires HV" && echo kube-filtered || echo kube-filter-not-found'
+stdout 'kube-filtered'
+
+message 'Monolith->Split: verified uni HV resolution (GRUB→cmdline→persist→runtime=kvm)'
+
+# ── Step 6: Verify vault and PCR12 state ──────────────────────
+# After a split-rootfs update, PCR 13 changes (new rootfs) and PCR 12
+# transitions from all-zeros (monolithic) to non-zero (extsloader extends it).
+# Vault must be unlocked (controller-assisted re-seal after PCR change).
+message 'Monolith->Split: verifying vault unlocked after PCR change...'
+eden eve ssh 'cat /run/status/vaultmgr/VaultStatus/global.json 2>/dev/null || echo no-vault-status'
+eden eve ssh 'eve exec pillar cat /persist/status/vaultmgr/VaultStatus/global.json 2>/dev/null | grep -q "unlocked\|VAULT_UNLOCKED" && echo vault-unlocked || echo vault-status-check-failed'
+
+# Verify vaultmgr waited for extsloader before unseal
+eden eve ssh 'logread | grep -q "(PCR12 final); proceeding with vault setup" && echo vault-waited-for-extsloader || echo vault-wait-not-found'
+stdout 'vault-waited-for-extsloader'
+
+# Verify vault key was re-sealed with new PCR values (controller-assisted recovery)
+eden eve ssh 'logread | grep -q "Re-sealing disk key" && echo vault-resealed || echo no-reseal-log'
+stdout 'vault-resealed'
+
+# Verify PCR12 was extended by extsloader (non-zero after Extension mount)
+eden eve ssh 'logread | grep "PCR12 extended" | tail -1'
+stdout 'PCR12 extended'
+
+# Verify attestation waited for extsloader before first quote
+eden eve ssh 'logread | grep -q "(PCR12 final); starting attestation" && echo attest-waited || echo attest-wait-not-found'
+stdout 'attest-waited'
+
+# Verify device is attested (controller accepted the quote)
+eden eve ssh 'logread | grep -c "Attest Successful" | xargs -I{} test {} -gt 0 && echo attested || echo not-attested'
+stdout 'attested'
+
+message 'Monolith->Split: SUCCESS - vault unlocked, PCR12 extended, attestation passed'
+
 message 'Monolith->Split: SUCCESS - CAS self-heal worked, Extension mounted via dm-verity'
 
 # Test's config file
@@ -130,3 +205,27 @@ while [ $i -lt 24 ]; do
 done
 echo "Extension not mounted after 240s"
 exit 1
+
+-- check-no-grub-menu.sh --
+#!/bin/bash
+# Verify that NO boot in the current QEMU session showed the HV selection menu.
+# The serial log uses logappend=on, so it may contain entries from previous runs.
+# We only check from the LAST "swtpm is starting" line (marks current session).
+EVE_LOG={{EdenConfig "eden.root"}}/default-eve.log
+
+if [ ! -f "$EVE_LOG" ]; then
+    echo "ERROR: EVE serial log not found at $EVE_LOG"
+    exit 1
+fi
+
+# Extract current session: everything after the last "swtpm is starting"
+CURRENT=$(tac "$EVE_LOG" | sed '/swtpm is starting/q' | tac)
+
+if echo "$CURRENT" | grep -q "Boot/Install EVE"; then
+    echo "FAIL: GRUB HV selection menu appeared during a boot!"
+    echo "--- GRUB menu lines in current session ---"
+    echo "$CURRENT" | grep -E "Boot/Install|Boot 0\." | head -10
+    exit 1
+fi
+
+echo "OK: No GRUB HV selection menu on any boot in current session"

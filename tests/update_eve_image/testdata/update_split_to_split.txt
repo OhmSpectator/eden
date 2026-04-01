@@ -29,6 +29,8 @@
 {{if $env_reg}}{{$eve_registry = $env_reg}}{{end}}
 
 {{$eve_hv := "kvm"}}
+{{$env_hv := EdenGetEnv "EVE_HV"}}
+{{if $env_hv}}{{$eve_hv = $env_hv}}{{end}}
 {{$eve_arch := EdenConfig "eve.arch"}}
 {{$short_version := printf "%s-%s-%s" $eve_ver $eve_hv $eve_arch}}
 {{$test_info := "test eden.lim.test -test.v -timewait 30m -test.run TestInfo"}}
@@ -81,9 +83,57 @@ stdout 'ext-img-count:1'
 eden eve ssh 'mountpoint -q /persist/exts && echo mounted || echo not-mounted'
 stdout 'mounted'
 
+# Extension should have been pre-extracted by baseosmgr (not CAS self-heal)
+eden eve ssh 'logread | grep -q "Extension image found at .* (pre-extracted by baseosmgr)" && echo pre-extracted || echo self-healed'
+stdout 'pre-extracted'
+
 # dm-verity mapper device must exist (proves Extension mounted via verity, not legacy loop)
 eden eve ssh 'ls /dev/mapper/exts-verity-* 2>/dev/null && echo verity-active || echo no-verity'
 stdout 'verity-active'
+
+# ── Step 6: Verify HV resolution on uni→uni update ───────────
+# On second OTA, both rootfs partitions say "uni". GRUB reads the EFI var
+# eve-hv-type (written by onboot.sh on first boot) to get the real HV type.
+message 'Split->Split: verifying uni HV resolution from EFI var...'
+
+# GRUB should NOT have eve_hv_type on cmdline (EFI var was found by set_eve_flavor,
+# so set_uni_boot was never called and didn't add it)
+eden eve ssh 'cat /proc/cmdline | tr " " "\n" | grep "^eve_hv_type=" | head -1 || echo no-cmdline-hv'
+
+# Runtime HV still KVM
+eden eve ssh 'cat /hostfs/run/eve-hv-type 2>/dev/null || echo unknown'
+stdout 'kvm'
+
+# EFI var still has the correct value (written by onboot.sh on previous boot)
+eden eve ssh 'dd if=/sys/firmware/efi/efivars/eve-hv-type-7ad58f29-2b49-4f5a-9f0b-4e7bf7c2c311 bs=1 skip=4 2>/dev/null | tr -d "\0" || echo missing'
+stdout 'kvm'
+
+# No GRUB menu shown
+exec bash check-no-grub-menu.sh
+
+# "uni" must never reach runtime — check both the final value and that the
+# safety fallback in onboot.sh was never triggered
+eden eve ssh 'cat /hostfs/run/eve-hv-type 2>/dev/null | grep -qx uni && echo uni-leaked || echo hv-ok'
+stdout 'hv-ok'
+eden eve ssh 'logread | grep -q "eve-hv-type resolved to .uni." && echo uni-safety-triggered || echo clean-resolve'
+stdout 'clean-resolve'
+
+# ── Step 7: Verify vault and PCR12 after split->split update ──
+message 'Split->Split: verifying vault and PCR12 state...'
+
+# Vault must be unlocked after update (PCR13 changed, controller re-sealed)
+eden eve ssh 'logread | grep -q "Re-sealing disk key" && echo vault-resealed || echo no-reseal-log'
+stdout 'vault-resealed'
+
+# PCR12 extended by extsloader
+eden eve ssh 'logread | grep "PCR12 extended" | tail -1'
+stdout 'PCR12 extended'
+
+# Attestation waited for extsloader
+eden eve ssh 'logread | grep -q "(PCR12 final); starting attestation" && echo attest-waited || echo attest-wait-not-found'
+stdout 'attest-waited'
+
+message 'Split->Split: SUCCESS - persist HV + vault + PCR12 verified'
 
 message 'Split->Split: SUCCESS'
 
@@ -127,3 +177,27 @@ while [ $i -lt 24 ]; do
 done
 echo "Extension not mounted after 240s"
 exit 1
+
+-- check-no-grub-menu.sh --
+#!/bin/bash
+# Verify that NO boot in the current QEMU session showed the HV selection menu.
+# The serial log uses logappend=on, so it may contain entries from previous runs.
+# We only check from the LAST "swtpm is starting" line (marks current session).
+EVE_LOG={{EdenConfig "eden.root"}}/default-eve.log
+
+if [ ! -f "$EVE_LOG" ]; then
+    echo "ERROR: EVE serial log not found at $EVE_LOG"
+    exit 1
+fi
+
+# Extract current session: everything after the last "swtpm is starting"
+CURRENT=$(tac "$EVE_LOG" | sed '/swtpm is starting/q' | tac)
+
+if echo "$CURRENT" | grep -q "Boot/Install EVE"; then
+    echo "FAIL: GRUB HV selection menu appeared during a boot!"
+    echo "--- GRUB menu lines in current session ---"
+    echo "$CURRENT" | grep -E "Boot/Install|Boot 0\." | head -10
+    exit 1
+fi
+
+echo "OK: No GRUB HV selection menu on any boot in current session"

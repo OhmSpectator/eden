@@ -130,12 +130,12 @@ stdout 'hv-ok'
 eden eve ssh 'logread | grep -q "eve-hv-type resolved to .uni." && echo uni-safety-triggered || echo clean-resolve'
 stdout 'clean-resolve'
 
-message 'Disconnect-Rollback: SUCCESS - rollback with running services, Extension cleaned up'
-
 {{if $skip_reset}}{{else}}
 # Reset config
 eden eve reset
 {{end}}
+
+message 'Disconnect-Rollback: SUCCESS - rollback with running services, Extension cleaned up'
 
 # Test's config file
 -- eden-config.yml --

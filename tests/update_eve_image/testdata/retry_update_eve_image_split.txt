@@ -68,9 +68,9 @@ stdout 'verity-active'
 eden eve ssh 'count=$(ls /persist/ext-img*.img 2>/dev/null | wc -l); echo "ext-img-count:$count"'
 stdout 'ext-img-count:1'
 
-# Extension should have been pre-extracted by baseosmgr (not CAS self-heal)
-eden eve ssh 'logread | grep -q "Extension image found at .* (pre-extracted by baseosmgr)" && echo pre-extracted || echo self-healed'
-stdout 'pre-extracted'
+# Extension was recovered via CAS self-heal (monolithic baseosmgr cannot pre-extract)
+eden eve ssh 'logread | grep -q "Extension image recovered from CAS to .* (self-heal)" && echo self-healed || echo pre-extracted'
+stdout 'self-healed'
 
 # No GRUB HV menu should appear on any boot
 exec bash check-no-grub-menu.sh

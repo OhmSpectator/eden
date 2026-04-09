@@ -66,5 +66,8 @@ eden.escript.test -testdata ../update_eve_image/testdata/ -test.run ^TestEdenScr
 /bin/echo Split rootfs full: PCR enforcement vault lock and rollback (10/{{$tests}})
 eden.escript.test -testdata ../update_eve_image/testdata/ -test.run ^TestEdenScripts$/^update_split_pcr_enforcement_rollback$
 
+# Clear PCR enforcement after test 10 (belt and suspenders — prepare script also does this).
+curl -k -s -X PUT https://{{EdenConfig "adam.ip"}}:{{EdenConfig "adam.port"}}/admin/options -H "Content-Type: application/json" -d '{"enforceTemplateAttestation": false, "PCRTemplates": []}'
+
 /bin/echo Split rootfs full: stopping sudo keepalive
 bash split-rootfs-sudo-cleanup.sh
